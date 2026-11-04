@@ -55,20 +55,23 @@ A common temptation is to build a local `stdio` MCP server (`list_skills`, `sear
    - **Stage 2 (Body Index — 0 Startup Tokens)**: Because harnesses only load YAML frontmatter at startup, the Markdown body of `skill-librarian/SKILL.md` stores the **complete, untruncated descriptions** of all library skills at **zero startup token cost**—preserving every trigger phrase once opened.
 2. **Direct Native `Read` Execution**: When a prompt touches a library domain, the agent reads `~/.agent-skills-library/<skill>/SKILL.md` via its native `Read` tool and resolves any bundled `scripts/` or `references/` relative to that folder.
 3. **Zero-Touch Auto-Offloading (`SessionStart` Hook + `.keep.json`)**: When you install new skills via `npx skills add` or similar tools, they land in your active skills directory. `skill-lib init` records your pinned active skills in `~/.agent-skills-library/.keep.json` and registers a `SessionStart` hook (`skill-lib sync --quiet`) in `~/.claude/settings.json` that automatically offloads and indexes any newly installed unpinned skills on session start—with zero manual commands required.
-4. **Automatic Zero-Prompt Claude Code Permissions**: `skill-lib init` adds `Skill(skill-librarian)` and `Read(~/.agent-skills-library/**)` to `~/.claude/settings.json` so Claude Code can load library skills from any project directory without permission prompts.
+4. **3-Tier Skill Protection & Plugin Declutter Policy**:
+   - **Tier 1 (Protected Core — Always `"on"`)**: Never disables essential cross-cutting skills (`context-mode:context-mode`, `opencode:*` delegation routers, `claude-mem:mem-search` & `smart-explore`, plus any skill pinned via `skill-lib protect <skill-id>` or `skill-lib activate <name>`).
+   - **Tier 2 (Operator Slash Commands — `"user-invocable-only"` / `disable-model-invocation: true`)**: Marks manual admin/diagnostic plugin commands (`/context-mode:ctx-stats`, `/context-mode:ctx-doctor`, `/claude-mem:handoff`, `/claude-mem:make-plan`, etc.) as user-invocable only—removing ~9,600 chars of prompt bloat while keeping every `/slash` command available when typed by the user.
+   - **Tier 3 (Domain & Duplicate Plugin Skills — Offloaded to Library)**: Harvests domain plugin skills (`hostinger-*`, `obsidian-*`, `skill-creator`) into `~/.agent-skills-library/` for on-demand loading via `skill-librarian` and mutes duplicate/domain plugin bloat (`disable-model-invocation: true`) in `~/.claude/plugins/{cache,synced}/`.
+5. **Automatic Zero-Prompt Claude Code Permissions**: `skill-lib init` adds `Skill(skill-librarian)` and `Read(~/.agent-skills-library/**)` to `~/.claude/settings.json` so Claude Code can load library skills from any project directory without permission prompts.
 
 ---
 
 ## Measured Context Savings & Live Claude Code Benchmark
 
-Tested on a real workstation with **44 installed skills** (3 core daily skills pinned active + 41 specialized domain skills offloaded to `~/.agent-skills-library/`):
+Tested on a real workstation with **57 local/harvested skills** (`3` core daily skills pinned active + `54` specialized domain skills offloaded to `~/.agent-skills-library/`) and **88 plugin/synced skills**:
 
-| Metric | Before (`44` Active Skills) | After (`3` Pinned + `skill-librarian` w/ Hints) | Savings |
+| Metric | Before (`skill-lib`) | After (`skill-lib` + 3-Tier Policy) | Savings |
 | :--- | :--- | :--- | :--- |
-| **Active Startup Skills** | 44 skills | 4 skills (`3` pinned + `1` router) | **40 fewer startup skills** |
-| **Startup Frontmatter Size** | 15,929 chars | 1,484 chars | **14,445 chars saved** |
-| **Estimated Startup Tokens** | ~3,982 tokens / turn | ~371 tokens / turn | **~3,611 tokens / turn (90% reduction)** |
-| **Marginal Cost of Installing 8 New `gsap-*` Skills** | +2,595 chars (~648 tokens) | **+12 chars (`gsap-* (8)`, ~3 tokens)** | **99.5% marginal reduction** |
+| **Local + Harvested Startup Skills** | 57 skills (`20,257` chars) | 4 skills (`1,558` chars) | **92.3% reduction (`18,699` chars / `~4,675` tokens saved)** |
+| **Total Claude Code `skill_listing` Attachment (Local + Plugins + Built-ins)** | 92 skills (`30,003` bytes / `~7,500` tokens) | 19 protected skills (`7,099` bytes / `~1,774` tokens) | **76.3% total reduction (`22,904` bytes / `~5,726` tokens saved)** |
+| **Marginal Cost of Installing 8 New `gsap-*` Skills** | +2,595 chars (`~648` tokens) | **+12 chars (`gsap-* (8)`, `~3` tokens)** | **99.5% marginal reduction** |
 | **Background Daemons** | 0 | 0 | **0 MCP processes** |
 
 ### Live `skill-lib list` Output
@@ -191,6 +194,9 @@ skill-lib offload --all --keep token-efficient-coding,obsidian-cli
 
 # Promote a library skill back to active startup context
 skill-lib activate stripe-cli
+
+# Protect a plugin or local skill ID in Tier 1 so it is never muted by skillOverrides
+skill-lib protect context-mode:context-mode claude-mem:mem-search
 
 # Search offline library skills by keyword
 skill-lib search temporal

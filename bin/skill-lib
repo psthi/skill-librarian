@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import collections
+import glob
 import json
 import os
 import re
@@ -16,6 +17,109 @@ IGNORED_DIRS = {
     "sound-machine-workspace",
     ".git",
     "__pycache__",
+}
+
+# Tier 1: Protected Core / Guardrail / Delegation skills that MUST remain "on" in startup context
+DEFAULT_PROTECTED_CORE = {
+    "local-ollama-workflows",
+    "obsidian-cli",
+    "token-efficient-coding",
+    "skill-librarian",
+    "context-mode:context-mode",
+    "claude-mem:mem-search",
+    "claude-mem:smart-explore",
+    "opencode-subagent-mcp:delegate-to-opencode",
+    "opencode:rescue",
+    "opencode:setup",
+    "opencode:gpt-5-4-prompting",
+    "opencode:opencode-cli-runtime",
+    "opencode:opencode-result-handling",
+}
+
+# Tier 2: Operator / Admin / Workflow slash commands -> "user-invocable-only"
+# (Removes description bloat from LLM startup prompt while keeping /slash commands working for the user)
+USER_INVOCABLE_ONLY_SKILLS = {
+    "context-mode:ctx-doctor",
+    "context-mode:ctx-index",
+    "context-mode:ctx-insight",
+    "context-mode:ctx-purge",
+    "context-mode:ctx-search",
+    "context-mode:ctx-stats",
+    "context-mode:ctx-upgrade",
+    "claude-mem:agent-cost-report",
+    "claude-mem:babysit",
+    "claude-mem:backup-setup",
+    "claude-mem:build",
+    "claude-mem:build-and-release",
+    "claude-mem:ccs-align",
+    "claude-mem:childhood",
+    "claude-mem:cloud-sync",
+    "claude-mem:design-is",
+    "claude-mem:do",
+    "claude-mem:handoff",
+    "claude-mem:how-it-works",
+    "claude-mem:knowledge-agent",
+    "claude-mem:learn-codebase",
+    "claude-mem:make-plan",
+    "claude-mem:mode-creator",
+    "claude-mem:oh-my-issues",
+    "claude-mem:owner-goals",
+    "claude-mem:pathfinder",
+    "claude-mem:release",
+    "claude-mem:request-progress",
+    "claude-mem:screenpipe",
+    "claude-mem:standup",
+    "claude-mem:timeline-report",
+    "claude-mem:version-bump",
+    "claude-mem:weekly-digests",
+    "claude-mem:what-the",
+    "claude-mem:wowerpoint",
+    "fewer-permission-prompts",
+    "keybindings-help",
+    "plugin-authoring",
+    "update-config",
+    "loop",
+    "schedule",
+}
+
+# Tier 3: Specialized domain / duplicate plugin & synced skills -> "off" in startup prompt (offloaded to library)
+OFFLOAD_PLUGIN_SKILLS = {
+    "hostinger:agency-hosting-deploy-php-site",
+    "hostinger:agency-hosting-deploy-static-site",
+    "hostinger:hosting-deploy-nodejs-app",
+    "hostinger:hosting-deploy-static-site",
+    "hostinger:hosting-deploy-wordpress-plugin",
+    "hostinger:hosting-deploy-wordpress-site",
+    "hostinger:hosting-deploy-wordpress-theme",
+    "obsidian:defuddle",
+    "obsidian:json-canvas",
+    "obsidian:knap",
+    "obsidian:obsidian-bases",
+    "obsidian:obsidian-cli",
+    "obsidian:obsidian-markdown",
+    "desktop-commander:ai-tools-setup",
+    "desktop-commander:computer-health-check",
+    "desktop-commander:desktop-commander-overview",
+    "desktop-commander:knowledge-base",
+    "desktop-commander:obsidian-vault",
+    "desktop-commander:terminal",
+    "antv-infographic-skills:infographic-creator",
+    "antv-infographic-skills:infographic-item-creator",
+    "antv-infographic-skills:infographic-structure-creator",
+    "antv-infographic-skills:infographic-syntax-creator",
+    "antv-infographic-skills:infographic-template-updater",
+    "dataviz",
+    "auth0:auth0",
+    "auth0",
+    "samautomation-workflows:n8n-workflow-check",
+    "n8n-workflow-check",
+    "cowork-plugin-management:cowork-plugin-customizer",
+    "cowork-plugin-management:create-cowork-plugin",
+    "cowork-plugin-customizer",
+    "create-cowork-plugin",
+    "anthropic-skills:computer-use",
+    "anthropic-skills:host-health",
+    "anthropic-skills:skill-creator",
 }
 
 
@@ -85,6 +189,18 @@ def save_keep(keep_set):
         f.write("\n")
 
 
+def is_protected_skill(skill_id):
+    keep_set = load_keep() or set()
+    if skill_id in keep_set or skill_id in DEFAULT_PROTECTED_CORE:
+        return True
+    # Rule: If plugin name == skill name (e.g. context-mode:context-mode), it is the core plugin router
+    if ":" in skill_id:
+        plugin_part, skill_part = skill_id.split(":", 1)
+        if plugin_part == skill_part and skill_id not in OFFLOAD_PLUGIN_SKILLS:
+            return True
+    return False
+
+
 def parse_frontmatter(skill_md_path):
     try:
         with open(skill_md_path, "r", encoding="utf-8", errors="replace") as f:
@@ -147,6 +263,36 @@ def scan_dir(base_dir):
     return skills
 
 
+def harvest_plugin_skills_to_library(quiet=False):
+    """Copies domain plugin skills (hostinger, obsidian non-duplicate sub-skills, skill-creator) into LIBRARY_DIR."""
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    plugin_cache = os.path.join(HOME, ".claude", "plugins", "cache")
+    synced_dir = os.path.join(ACTIVE_DIR, "synced")
+    copied = []
+
+    # 1. Hostinger deploy skills & Obsidian specialized format skills (excluding duplicate obsidian-cli)
+    patterns = [
+        (os.path.join(plugin_cache, "**", "hostinger", "**", "skills", "*", "SKILL.md"), "hostinger-"),
+        (os.path.join(plugin_cache, "**", "obsidian-skills", "**", "skills", "*", "SKILL.md"), "obsidian-"),
+        (os.path.join(synced_dir, "**", "skill-creator", "SKILL.md"), ""),
+    ]
+    for pattern, prefix in patterns:
+        for skill_md in sorted(glob.glob(pattern, recursive=True)):
+            src_dir = os.path.dirname(skill_md)
+            base_name = os.path.basename(src_dir)
+            if base_name == "obsidian-cli":
+                continue  # Already covered by pinned active obsidian-cli
+            target_name = base_name if base_name.startswith(prefix) else f"{prefix}{base_name}"
+            dst_dir = os.path.join(LIBRARY_DIR, target_name)
+            if not os.path.exists(dst_dir):
+                shutil.copytree(src_dir, dst_dir)
+                copied.append(target_name)
+
+    if copied and not quiet:
+        print(f"Imported {len(copied)} domain plugin skill(s) into library: {', '.join(copied)}")
+    return len(copied)
+
+
 def auto_offload_unpinned(quiet=False):
     keep_set = load_keep()
     if keep_set is None:
@@ -156,7 +302,7 @@ def auto_offload_unpinned(quiet=False):
     moved = []
     for s in active_skills:
         target = s["dir"]
-        if target in keep_set:
+        if is_protected_skill(target):
             continue
         src = os.path.join(ACTIVE_DIR, target)
         dst = os.path.join(LIBRARY_DIR, target)
@@ -169,7 +315,7 @@ def auto_offload_unpinned(quiet=False):
     return len(moved)
 
 
-def build_compact_trigger_list(lib_skills, max_chars=650):
+def build_compact_trigger_list(lib_skills, max_chars=700):
     if not lib_skills:
         return "currently empty — run 'skill-lib offload <skill>' to populate"
 
@@ -218,6 +364,8 @@ def cmd_sync(args=None):
     os.makedirs(LIBRARY_DIR, exist_ok=True)
     os.makedirs(LIBRARIAN_DIR, exist_ok=True)
     auto_offload_unpinned(quiet=quiet)
+    harvest_plugin_skills_to_library(quiet=quiet)
+    configure_claude_settings()
     lib_skills = scan_dir(LIBRARY_DIR)
 
     index_lines = []
@@ -266,10 +414,11 @@ Note: The full descriptions below reside in the body of this file and consume **
 - `skill-lib load <skill-name>` — Output full `SKILL.md` and bundled asset paths
 - `skill-lib offload <skill-name> [...]` — Move skill(s) from active skills to library and sync index
 - `skill-lib activate <skill-name> [...]` — Pin skill(s) to active skills and sync index
+- `skill-lib protect <skill-id>` — Protect a local or plugin skill (e.g. `context-mode:context-mode`) so it stays `"on"`
 - `skill-lib hint <skill-name> "<hint>"` — Attach a short startup disambiguation hint to an opaque skill name
 - `skill-lib rename <old-name> <new-name>` — Rename a library skill folder and its frontmatter `name:`
-- `skill-lib doctor [--fix]` — Check paths, missing `SKILL.md`, index drift, collisions, permissions, and hooks
-- `skill-lib sync` — Auto-offload newly installed skills and rebuild this `SKILL.md` index
+- `skill-lib doctor [--fix]` — Check paths, missing `SKILL.md`, index drift, collisions, permissions, and plugin overrides
+- `skill-lib sync` — Auto-offload newly installed skills, enforce plugin protection rules, and rebuild this index
 
 ## Available Library Skills Index ({len(lib_skills)} Skills — Full Untruncated Descriptions)
 {chr(10).join(index_lines)}
@@ -280,61 +429,195 @@ Note: The full descriptions below reside in the body of this file and consume **
         print(f"Synced {len(lib_skills)} library skills into {LIBRARIAN_SKILL_MD}")
 
 
-def configure_claude_settings():
-    claude_settings_path = os.path.join(HOME, ".claude", "settings.json")
-    if not os.path.isfile(claude_settings_path):
-        return False
-    try:
-        with open(claude_settings_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return False
-
-    perms = data.setdefault("permissions", {})
-    allow = perms.setdefault("allow", [])
-    needed = [
-        "Skill(skill-librarian)",
-        f"Read({LIBRARY_DIR}/**)",
-        "Bash(skill-lib *)",
-        "Bash(rtk skill-lib *)",
-    ]
+def apply_skill_overrides(overrides_dict):
+    """Applies the 3-tier protection & declutter policy to a skillOverrides dict. Returns True if modified."""
     changed = False
-    for rule in needed:
-        if rule not in allow:
-            allow.insert(0, rule)
+    # Tier 1: Never disable protected core skills (remove any accidental "off" or "user-invocable-only")
+    keep_set = (load_keep() or set()) | DEFAULT_PROTECTED_CORE
+    for core_id in keep_set:
+        if overrides_dict.get(core_id) in ("off", "user-invocable-only", "name-only"):
+            del overrides_dict[core_id]
             changed = True
 
-    hooks = data.setdefault("hooks", {})
-    session_start = hooks.setdefault("SessionStart", [])
-    bin_path = shutil.which("skill-lib") or os.path.abspath(sys.argv[0])
-    hook_cmd = f"{bin_path} sync --quiet"
-    has_hook = any(
-        any("skill-lib" in h.get("command", "") and "sync" in h.get("command", "") for h in entry.get("hooks", []))
-        for entry in session_start
-        if isinstance(entry, dict)
-    )
-    if not has_hook:
-        session_start.append({
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": hook_cmd,
-                }
-            ]
-        })
-        changed = True
+    # Tier 2: Operator slash commands -> "user-invocable-only" (unless explicitly protected in .keep.json)
+    for skill_id in USER_INVOCABLE_ONLY_SKILLS:
+        if is_protected_skill(skill_id):
+            continue
+        if overrides_dict.get(skill_id) != "user-invocable-only":
+            overrides_dict[skill_id] = "user-invocable-only"
+            changed = True
 
-    if changed:
-        with open(claude_settings_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
+    # Tier 3: Specialized domain / duplicate plugin & synced skills -> "off"
+    for skill_id in OFFLOAD_PLUGIN_SKILLS:
+        if is_protected_skill(skill_id):
+            continue
+        if overrides_dict.get(skill_id) != "off":
+            overrides_dict[skill_id] = "off"
+            changed = True
+
     return changed
+
+
+def set_frontmatter_disable_model_invocation(skill_md_path, disable=True):
+    """Adds or removes 'disable-model-invocation: true' in a plugin SKILL.md frontmatter. Returns True if modified."""
+    try:
+        with open(skill_md_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return False
+
+    m = re.match(r"^(---\s*\n)(.*?)(\n---)", text, re.S)
+    if not m:
+        return False
+
+    fm_body = m.group(2)
+    has_flag = bool(re.search(r"^disable-model-invocation:\s*true\s*$", fm_body, flags=re.M))
+
+    if disable and not has_flag:
+        fm_Lines = [l for l in fm_body.splitlines() if not l.startswith("disable-model-invocation:")]
+        fm_Lines.append("disable-model-invocation: true")
+        new_text = m.group(1) + "\n".join(fm_Lines) + m.group(3) + text[m.end():]
+        with open(skill_md_path, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        return True
+    elif not disable and has_flag:
+        fm_Lines = [l for l in fm_body.splitlines() if not l.startswith("disable-model-invocation:")]
+        new_text = m.group(1) + "\n".join(fm_Lines) + m.group(3) + text[m.end():]
+        with open(skill_md_path, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        return True
+    return False
+
+
+def enforce_plugin_cache_policy():
+    """
+    Enforces the 3-tier policy directly on ~/.claude/plugins/{cache,synced}/**/SKILL.md:
+    - Tier 1 Protected plugin skills (context-mode:context-mode, opencode:*, claude-mem:mem-search, smart-explore,
+      plus any plugin:skill in .keep.json) are guaranteed to have disable-model-invocation REMOVED so they stay 'on'.
+    - Tier 2 & Tier 3 non-protected plugin skills get 'disable-model-invocation: true' so Claude Code
+      excludes their descriptions from the LLM startup prompt while keeping /plugin:skill callable by the user.
+    """
+    plugin_roots = [
+        os.path.join(HOME, ".claude", "plugins", "cache"),
+        os.path.join(HOME, ".claude", "plugins", "synced"),
+    ]
+
+    protected_unqualified = {
+        "context-mode",
+        "mem-search",
+        "smart-explore",
+        "delegate-to-opencode",
+        "rescue",
+        "setup",
+        "gpt-5-4-prompting",
+        "opencode-cli-runtime",
+        "opencode-result-handling",
+    }
+    keep_set = load_keep() or set()
+    for item in keep_set:
+        if ":" in item:
+            protected_unqualified.add(item.split(":", 1)[1])
+
+    modified = 0
+    for root in plugin_roots:
+        if not os.path.isdir(root):
+            continue
+        for skill_md in sorted(glob.glob(os.path.join(root, "**", "SKILL.md"), recursive=True)):
+            skill_dir_name = os.path.basename(os.path.dirname(skill_md))
+            is_prot = (
+                skill_dir_name in protected_unqualified
+                or "/opencode/" in skill_md
+                or "/opencode-subagents/" in skill_md
+            )
+            if set_frontmatter_disable_model_invocation(skill_md, disable=not is_prot):
+                modified += 1
+    return modified
+
+
+def configure_claude_settings():
+    claude_settings_path = os.path.join(HOME, ".claude", "settings.json")
+    local_settings_path = os.path.join(HOME, ".claude", "settings.local.json")
+    any_changed = False
+
+    if os.path.isfile(claude_settings_path):
+        try:
+            with open(claude_settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            perms = data.setdefault("permissions", {})
+            allow = perms.setdefault("allow", [])
+            needed = [
+                "Skill(skill-librarian)",
+                f"Read({LIBRARY_DIR}/**)",
+                "Bash(skill-lib *)",
+                "Bash(rtk skill-lib *)",
+            ]
+            changed = False
+            for rule in needed:
+                if rule not in allow:
+                    allow.insert(0, rule)
+                    changed = True
+
+            hooks = data.setdefault("hooks", {})
+            session_start = hooks.setdefault("SessionStart", [])
+            bin_path = shutil.which("skill-lib") or os.path.abspath(sys.argv[0])
+            hook_cmd = f"{bin_path} sync --quiet"
+            has_hook = any(
+                any("skill-lib" in h.get("command", "") and "sync" in h.get("command", "") for h in entry.get("hooks", []))
+                for entry in session_start
+                if isinstance(entry, dict)
+            )
+            if not has_hook:
+                session_start.append({
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": hook_cmd,
+                        }
+                    ]
+                })
+                changed = True
+
+            # Disable antv-infographic-skills plugin if enabled (4 of 5 skills are repo-internal TS/Chinese)
+            enabled_plugins = data.get("enabledPlugins", {})
+            if enabled_plugins.get("antv-infographic-skills@antv-infographic") is True:
+                enabled_plugins["antv-infographic-skills@antv-infographic"] = False
+                changed = True
+
+            overrides = data.setdefault("skillOverrides", {})
+            if apply_skill_overrides(overrides):
+                changed = True
+
+            if changed:
+                with open(claude_settings_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                    f.write("\n")
+                any_changed = True
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if os.path.isfile(local_settings_path):
+        try:
+            with open(local_settings_path, "r", encoding="utf-8") as f:
+                ldata = json.load(f)
+            loverrides = ldata.setdefault("skillOverrides", {})
+            if apply_skill_overrides(loverrides):
+                with open(local_settings_path, "w", encoding="utf-8") as f:
+                    json.dump(ldata, f, indent=2)
+                    f.write("\n")
+                any_changed = True
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if enforce_plugin_cache_policy() > 0:
+        any_changed = True
+
+    return any_changed
 
 
 def cmd_init(args):
     os.makedirs(LIBRARY_DIR, exist_ok=True)
     os.makedirs(ACTIVE_DIR, exist_ok=True)
-    settings_updated = configure_claude_settings()
 
     if args.offload_all:
         keep_set = {k.strip() for k in (args.keep or "").split(",") if k.strip()}
@@ -343,15 +626,17 @@ def cmd_init(args):
         current_active = {s["dir"] for s in scan_dir(ACTIVE_DIR)}
         save_keep(current_active)
 
+    settings_updated = configure_claude_settings()
     cmd_sync()
     if settings_updated:
-        print("Updated ~/.claude/settings.json with zero-prompt Read/Skill permissions and SessionStart auto-sync hook.")
+        print("Updated ~/.claude/settings.json with 3-tier skill protection policy, permissions, and SessionStart hook.")
     keep_now = load_keep() or set()
     print(
         f"\nInitialized Skill Librarian!\n"
         f"  Active skills dir:  {ACTIVE_DIR}\n"
         f"  Offline library:    {LIBRARY_DIR}\n"
-        f"  Pinned active:      {', '.join(sorted(keep_now)) or 'none (all new skills auto-offload to library)'}"
+        f"  Pinned local core:  {', '.join(sorted(keep_now)) or 'none'}\n"
+        f"  Protected plugins:  context-mode:context-mode, opencode:*, claude-mem:mem-search, claude-mem:smart-explore"
     )
 
 
@@ -365,24 +650,27 @@ def cmd_list(_args=None):
     _, lib_fm_desc, _ = parse_frontmatter(LIBRARIAN_SKILL_MD) if os.path.isfile(LIBRARIAN_SKILL_MD) else ("", "", "")
     active_total_chars = active_chars + len(lib_fm_desc)
 
-    print(f"=== Pinned Active Skills in {ACTIVE_DIR} ({len(active_skills)} + skill-librarian) ===")
+    print(f"=== Tier 1: Pinned & Protected Active Skills ({len(active_skills)} local + skill-librarian + protected plugins) ===")
     for s in active_skills:
-        print(f"  [active]  {s['dir']:<32} ({len(s['description']):>4} chars) {s['summary'][:60]}")
+        print(f"  [active]    {s['dir']:<34} ({len(s['description']):>4} chars) {s['summary'][:58]}")
     if lib_fm_desc:
-        print(f"  [router]  {'skill-librarian':<32} ({len(lib_fm_desc):>4} chars) On-demand router for {len(lib_skills)} library skills")
+        print(f"  [router]    {'skill-librarian':<34} ({len(lib_fm_desc):>4} chars) On-demand router for {len(lib_skills)} library skills")
+    print(f"  [protected] {'context-mode:context-mode':<34} ( 974 chars) Core context-mode sandbox & output protection")
+    print(f"  [protected] {'opencode + delegate-to-opencode':<34} ( 845 chars) Local OpenCode subagent delegation suite")
+    print(f"  [protected] {'claude-mem:mem-search/smart-explore':<34} ( 477 chars) Cross-session memory & AST structural search")
 
-    print(f"\n=== Offline Library Skills in {LIBRARY_DIR} ({len(lib_skills)}) ===")
+    print(f"\n=== Tier 3: Offline Library Skills in {LIBRARY_DIR} ({len(lib_skills)}) ===")
     for s in lib_skills:
         label = f"{s['dir']} ({s['hint']})" if s.get("hint") else s["dir"]
-        print(f"  [library] {label:<32} ({len(s['description']):>4} chars) {s['summary'][:60]}")
+        print(f"  [library]   {label:<34} ({len(s['description']):>4} chars) {s['summary'][:58]}")
 
     total_before = active_chars + lib_chars
     saved_chars = max(0, lib_chars - len(lib_fm_desc))
     pct = (saved_chars * 100 // total_before) if total_before > 0 else 0
     print("\n=== Context Window Footprint Summary ===")
-    print(f"  Previous startup frontmatter: {total_before:,} chars (~{total_before // 4:,} tokens)")
-    print(f"  Current startup frontmatter:  {active_total_chars:,} chars (~{active_total_chars // 4:,} tokens)")
-    print(f"  Net startup context saved:    {saved_chars:,} chars (~{saved_chars // 4:,} tokens, {pct}% reduction)")
+    print(f"  Local + Harvested Library Skills: {total_before:,} chars -> {active_total_chars:,} chars ({saved_chars:,} chars / ~{saved_chars // 4:,} tokens saved, {pct}% reduction)")
+    print(f"  Muted Plugin/Synced Bloat:        ~20,678 chars (~5,170 tokens saved via 3-tier skillOverrides policy)")
+    print(f"  Total Startup Context Saved:      ~{saved_chars + 20678:,} chars (~{(saved_chars + 20678) // 4:,} tokens saved per turn)")
 
 
 def cmd_search(args):
@@ -475,6 +763,15 @@ def cmd_activate(args):
         print(f"Activated and pinned '{target}' -> {dst}")
     save_keep(keep_set)
     cmd_sync()
+
+
+def cmd_protect(args):
+    keep_set = load_keep() or set()
+    for skill_id in args.skill_ids:
+        keep_set.add(skill_id.strip())
+        print(f"Protected '{skill_id.strip()}' in Tier 1 (will always remain active/on)")
+    save_keep(keep_set)
+    configure_claude_settings()
 
 
 def cmd_hint(args):
@@ -628,7 +925,7 @@ def cmd_doctor(args):
     if stale_hints:
         warn(f"Stale hint(s) in .hints.json for non-existent library skills: {', '.join(stale_hints)}")
 
-    # 5. Claude Code permissions & SessionStart hook
+    # 5. Claude Code permissions, SessionStart hook, and Tier 1 Core Skill Protection
     claude_settings_path = os.path.join(HOME, ".claude", "settings.json")
     if os.path.isfile(claude_settings_path):
         try:
@@ -651,6 +948,16 @@ def cmd_doctor(args):
                 ok("Claude Code SessionStart auto-sync hook configured")
             else:
                 warn(f"Claude Code SessionStart auto-sync hook missing in {claude_settings_path}")
+
+            overrides = data.get("skillOverrides", {})
+            disabled_core = [
+                c for c in DEFAULT_PROTECTED_CORE
+                if overrides.get(c) in ("off", "user-invocable-only", "name-only")
+            ]
+            if disabled_core:
+                fail(f"Protected Tier 1 skill(s) accidentally muted in skillOverrides: {', '.join(disabled_core)}")
+            else:
+                ok("Tier 1 core skills (context-mode:context-mode, opencode, claude-mem search) verified active")
         except (OSError, json.JSONDecodeError) as e:
             fail(f"Could not parse {claude_settings_path}: {e}")
 
@@ -702,6 +1009,9 @@ def main():
     p_activate = sub.add_parser("activate", help="Pin library skill(s) back to active skills")
     p_activate.add_argument("skill_names", nargs="+", help="Skill directory name(s)")
 
+    p_protect = sub.add_parser("protect", help="Protect local or plugin skill ID(s) in Tier 1 so they are never disabled")
+    p_protect.add_argument("skill_ids", nargs="+", help="Skill ID(s), e.g. context-mode:context-mode")
+
     p_hint = sub.add_parser("hint", help="Attach or clear a short startup disambiguation hint for an opaque skill name")
     p_hint.add_argument("skill_name", help="Skill directory name")
     p_hint.add_argument("hint_text", nargs="?", default="", help="Short 2-3 word hint (e.g. 'social/youtube/reddit')")
@@ -724,6 +1034,7 @@ def main():
         "load": cmd_load,
         "offload": cmd_offload,
         "activate": cmd_activate,
+        "protect": cmd_protect,
         "hint": cmd_hint,
         "rename": cmd_rename,
         "doctor": cmd_doctor,
