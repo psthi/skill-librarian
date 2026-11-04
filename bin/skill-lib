@@ -44,6 +44,7 @@ def resolve_library_dir():
 ACTIVE_DIR = resolve_active_dir()
 LIBRARY_DIR = resolve_library_dir()
 HINTS_FILE = os.path.join(LIBRARY_DIR, ".hints.json")
+KEEP_FILE = os.path.join(LIBRARY_DIR, ".keep.json")
 LIBRARIAN_DIR = os.path.join(ACTIVE_DIR, "skill-librarian")
 LIBRARIAN_SKILL_MD = os.path.join(LIBRARIAN_DIR, "SKILL.md")
 
@@ -63,6 +64,24 @@ def save_hints(hints):
     os.makedirs(LIBRARY_DIR, exist_ok=True)
     with open(HINTS_FILE, "w", encoding="utf-8") as f:
         json.dump(hints, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def load_keep():
+    if not os.path.isfile(KEEP_FILE):
+        return None
+    try:
+        with open(KEEP_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return set(data) if isinstance(data, list) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def save_keep(keep_set):
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    with open(KEEP_FILE, "w", encoding="utf-8") as f:
+        json.dump(sorted(keep_set), f, indent=2)
         f.write("\n")
 
 
@@ -128,6 +147,28 @@ def scan_dir(base_dir):
     return skills
 
 
+def auto_offload_unpinned(quiet=False):
+    keep_set = load_keep()
+    if keep_set is None:
+        return 0
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    active_skills = scan_dir(ACTIVE_DIR)
+    moved = []
+    for s in active_skills:
+        target = s["dir"]
+        if target in keep_set:
+            continue
+        src = os.path.join(ACTIVE_DIR, target)
+        dst = os.path.join(LIBRARY_DIR, target)
+        if os.path.exists(dst):
+            shutil.rmtree(dst) if os.path.isdir(dst) and not os.path.islink(dst) else os.remove(dst)
+        shutil.move(src, dst)
+        moved.append(target)
+    if moved and not quiet:
+        print(f"Auto-offloaded {len(moved)} newly installed skill(s) to library: {', '.join(moved)}")
+    return len(moved)
+
+
 def build_compact_trigger_list(lib_skills, max_chars=650):
     if not lib_skills:
         return "currently empty — run 'skill-lib offload <skill>' to populate"
@@ -172,9 +213,11 @@ def build_compact_trigger_list(lib_skills, max_chars=650):
     return ", ".join(out)
 
 
-def cmd_sync(_args=None):
+def cmd_sync(args=None):
+    quiet = getattr(args, "quiet", False) if args else False
     os.makedirs(LIBRARY_DIR, exist_ok=True)
     os.makedirs(LIBRARIAN_DIR, exist_ok=True)
+    auto_offload_unpinned(quiet=quiet)
     lib_skills = scan_dir(LIBRARY_DIR)
 
     index_lines = []
@@ -218,24 +261,25 @@ Note: The full descriptions below reside in the body of this file and consume **
 4. Resolve any relative `scripts/`, `references/`, `resources/`, or `examples/` paths against `{LIBRARY_DIR}/<skill-name>/`.
 
 ## CLI Management Commands (`skill-lib`)
-- `skill-lib list` — Show active vs. library skills and context token savings
+- `skill-lib list` — Auto-offload unpinned skills and show active vs. library token savings
 - `skill-lib search <query>` — Keyword search across library skill names and descriptions
 - `skill-lib load <skill-name>` — Output full `SKILL.md` and bundled asset paths
 - `skill-lib offload <skill-name> [...]` — Move skill(s) from active skills to library and sync index
-- `skill-lib activate <skill-name> [...]` — Move skill(s) from library back to active skills and sync index
+- `skill-lib activate <skill-name> [...]` — Pin skill(s) to active skills and sync index
 - `skill-lib hint <skill-name> "<hint>"` — Attach a short startup disambiguation hint to an opaque skill name
 - `skill-lib rename <old-name> <new-name>` — Rename a library skill folder and its frontmatter `name:`
-- `skill-lib sync` — Rebuild this `SKILL.md` index from `{LIBRARY_DIR}/`
+- `skill-lib sync` — Auto-offload newly installed skills and rebuild this `SKILL.md` index
 
 ## Available Library Skills Index ({len(lib_skills)} Skills — Full Untruncated Descriptions)
 {chr(10).join(index_lines)}
 """
     with open(LIBRARIAN_SKILL_MD, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"Synced {len(lib_skills)} library skills into {LIBRARIAN_SKILL_MD}")
+    if not quiet:
+        print(f"Synced {len(lib_skills)} library skills into {LIBRARIAN_SKILL_MD}")
 
 
-def configure_claude_permissions():
+def configure_claude_settings():
     claude_settings_path = os.path.join(HOME, ".claude", "settings.json")
     if not os.path.isfile(claude_settings_path):
         return False
@@ -259,6 +303,25 @@ def configure_claude_permissions():
             allow.insert(0, rule)
             changed = True
 
+    hooks = data.setdefault("hooks", {})
+    session_start = hooks.setdefault("SessionStart", [])
+    hook_cmd = f"{os.path.join(HOME, '.local', 'bin', 'skill-lib')} sync --quiet"
+    has_hook = any(
+        any(h.get("command") == hook_cmd for h in entry.get("hooks", []))
+        for entry in session_start
+        if isinstance(entry, dict)
+    )
+    if not has_hook:
+        session_start.append({
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": hook_cmd,
+                }
+            ]
+        })
+        changed = True
+
     if changed:
         with open(claude_settings_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -269,30 +332,30 @@ def configure_claude_permissions():
 def cmd_init(args):
     os.makedirs(LIBRARY_DIR, exist_ok=True)
     os.makedirs(ACTIVE_DIR, exist_ok=True)
-    perms_updated = configure_claude_permissions()
+    settings_updated = configure_claude_settings()
 
     if args.offload_all:
         keep_set = {k.strip() for k in (args.keep or "").split(",") if k.strip()}
-        active_skills = scan_dir(ACTIVE_DIR)
-        moved = 0
-        for s in active_skills:
-            if s["dir"] in keep_set:
-                continue
-            src = os.path.join(ACTIVE_DIR, s["dir"])
-            dst = os.path.join(LIBRARY_DIR, s["dir"])
-            if os.path.exists(dst):
-                shutil.rmtree(dst) if os.path.isdir(dst) and not os.path.islink(dst) else os.remove(dst)
-            shutil.move(src, dst)
-            moved += 1
-        print(f"Offloaded {moved} skills to {LIBRARY_DIR} (kept: {', '.join(sorted(keep_set)) or 'none'})")
+        save_keep(keep_set)
+    elif load_keep() is None:
+        current_active = {s["dir"] for s in scan_dir(ACTIVE_DIR)}
+        save_keep(current_active)
 
     cmd_sync()
-    if perms_updated:
-        print("Updated ~/.claude/settings.json with zero-prompt Read/Skill permissions for skill-librarian.")
-    print(f"\nInitialized Skill Librarian!\n  Active skills dir:  {ACTIVE_DIR}\n  Offline library:    {LIBRARY_DIR}")
+    if settings_updated:
+        print("Updated ~/.claude/settings.json with zero-prompt Read/Skill permissions and SessionStart auto-sync hook.")
+    keep_now = load_keep() or set()
+    print(
+        f"\nInitialized Skill Librarian!\n"
+        f"  Active skills dir:  {ACTIVE_DIR}\n"
+        f"  Offline library:    {LIBRARY_DIR}\n"
+        f"  Pinned active:      {', '.join(sorted(keep_now)) or 'none (all new skills auto-offload to library)'}"
+    )
 
 
 def cmd_list(_args=None):
+    if auto_offload_unpinned(quiet=False) > 0:
+        cmd_sync()
     active_skills = scan_dir(ACTIVE_DIR)
     lib_skills = scan_dir(LIBRARY_DIR)
     active_chars = sum(len(s["description"]) for s in active_skills)
@@ -300,7 +363,7 @@ def cmd_list(_args=None):
     _, lib_fm_desc, _ = parse_frontmatter(LIBRARIAN_SKILL_MD) if os.path.isfile(LIBRARIAN_SKILL_MD) else ("", "", "")
     active_total_chars = active_chars + len(lib_fm_desc)
 
-    print(f"=== Active Skills in {ACTIVE_DIR} ({len(active_skills)} + skill-librarian) ===")
+    print(f"=== Pinned Active Skills in {ACTIVE_DIR} ({len(active_skills)} + skill-librarian) ===")
     for s in active_skills:
         print(f"  [active]  {s['dir']:<32} ({len(s['description']):>4} chars) {s['summary'][:60]}")
     if lib_fm_desc:
@@ -358,11 +421,19 @@ def cmd_load(args):
 
 def cmd_offload(args):
     os.makedirs(LIBRARY_DIR, exist_ok=True)
+    keep_set = load_keep()
+    if keep_set is None:
+        keep_set = {s["dir"] for s in scan_dir(ACTIVE_DIR)}
+
     if args.all:
         keep_set = {k.strip() for k in (args.keep or "").split(",") if k.strip()}
+        save_keep(keep_set)
         targets = [s["dir"] for s in scan_dir(ACTIVE_DIR) if s["dir"] not in keep_set]
     else:
         targets = [t.strip() for t in args.skill_names if t.strip()]
+        for t in targets:
+            keep_set.discard(t)
+        save_keep(keep_set)
 
     if not targets:
         print("No matching active skills to offload.", file=sys.stderr)
@@ -383,6 +454,10 @@ def cmd_offload(args):
 
 def cmd_activate(args):
     os.makedirs(ACTIVE_DIR, exist_ok=True)
+    keep_set = load_keep()
+    if keep_set is None:
+        keep_set = {s["dir"] for s in scan_dir(ACTIVE_DIR)}
+
     for target in args.skill_names:
         target = target.strip()
         src = os.path.join(LIBRARY_DIR, target)
@@ -394,7 +469,9 @@ def cmd_activate(args):
             print(f"Warning: '{target}' already exists in {ACTIVE_DIR}", file=sys.stderr)
             continue
         shutil.move(src, dst)
-        print(f"Activated '{target}' -> {dst}")
+        keep_set.add(target)
+        print(f"Activated and pinned '{target}' -> {dst}")
+    save_keep(keep_set)
     cmd_sync()
 
 
@@ -456,9 +533,11 @@ def main():
     p_init.add_argument("--offload-all", action="store_true", help="Offload all current active skills to the library")
     p_init.add_argument("--keep", type=str, default="", help="Comma-separated list of active skills to keep when using --offload-all")
 
-    sub.add_parser("list", help="List active and library skills with context token savings")
+    sub.add_parser("list", help="Auto-offload unpinned skills and list active/library skills with token savings")
     sub.add_parser("status", help="Alias for list")
-    sub.add_parser("sync", help="Regenerate skill-librarian/SKILL.md from library")
+
+    p_sync = sub.add_parser("sync", help="Auto-offload newly installed skills and regenerate skill-librarian/SKILL.md")
+    p_sync.add_argument("--quiet", action="store_true", help="Suppress stdout (for SessionStart hooks)")
 
     p_search = sub.add_parser("search", help="Search library skills by keyword")
     p_search.add_argument("query", nargs="+", help="Search query")
@@ -471,7 +550,7 @@ def main():
     p_offload.add_argument("--all", action="store_true", help="Offload all active skills except those in --keep")
     p_offload.add_argument("--keep", type=str, default="", help="Comma-separated list of active skills to keep active")
 
-    p_activate = sub.add_parser("activate", help="Move library skill(s) back to active skills")
+    p_activate = sub.add_parser("activate", help="Pin library skill(s) back to active skills")
     p_activate.add_argument("skill_names", nargs="+", help="Skill directory name(s)")
 
     p_hint = sub.add_parser("hint", help="Attach or clear a short startup disambiguation hint for an opaque skill name")
