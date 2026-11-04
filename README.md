@@ -63,6 +63,32 @@ A common temptation is to build a local `stdio` MCP server (`list_skills`, `sear
 
 ---
 
+## How Keyword & Catchphrase Triggering Works
+
+How a skill gets invoked depends on which tier it belongs to:
+
+### 1. Tier 1 Protected Skills (Immediate 1-Step Trigger on Any Catchphrase)
+- **Skills**: `context-mode:context-mode`, `opencode:*` delegation routers, `claude-mem:mem-search`, `claude-mem:smart-explore`, plus your pinned local skills (e.g., `token-efficient-coding`, `obsidian-cli`, `local-ollama-workflows`).
+- **Behavior**: Their full descriptions remain in the agent's startup prompt (`skill_listing`), so any keyword or catchphrase inside them (e.g., *"analyze logs"*, *"did we already solve this?"*, *"Playwright snapshot"*, *"outline this file"*) triggers immediately on Turn 1.
+
+### 2. Offline Library Skills in `skill-librarian` (1-Step Fast-Path + 2-Step Fallback Index)
+- **Domain Keywords & Hints (1-Step Fast-Path)**: Whenever your prompt includes a keyword matching the startup trigger list in `skill-librarian/SKILL.md`—such as *"GSAP"*, *"ScrollTrigger"*, *"n8n"*, *"Stripe"*, *"Temporal"*, *"Hostinger"*, *"SEO audit"*, *"infographic"*, *"Xiaohongshu/YouTube subtitles"* (`agent-reach (social/youtube/reddit)`), *"Reddit/X trends"* (`last30days (trends/reddit/x)`), or *"whitepaper/PDF"* (`autoreport (reports/pdf)`)—the agent reads `~/.agent-skills-library/<skill>/SKILL.md` directly on Turn 1.
+- **Buried Catchphrases Inside Descriptions (2-Step Index Lookup)**: Some skills contain niche trigger phrases inside their description that are not obvious from the folder name alone (for example, *"create a podcast about X"* inside `notebooklm`, or *"Defuddle"* inside `obsidian-defuddle`). For these, the fallback rule in `skill-librarian`'s frontmatter directs the agent to read `skill-librarian/SKILL.md` first, where the **full, untruncated descriptions and catchphrases** of all library skills are stored at zero startup token cost.
+- **Promoting Any Catchphrase to 1-Step (`skill-lib hint`)**: If you frequently use a specific catchphrase for an opaque-named library skill, attach a micro-hint so it appears directly in the startup prompt for ~3 tokens:
+  ```bash
+  skill-lib hint notebooklm "podcast/notebooks"
+  ```
+
+### 3. Tier 2 Muted Plugin Slash Commands (Explicit `/slash` Invocation Only)
+- **Skills**: Operator/utility plugin commands such as `/context-mode:ctx-stats`, `/context-mode:ctx-doctor`, `/claude-mem:make-plan`, `/claude-mem:handoff`.
+- **Behavior**: Because these have `disable-model-invocation: true` (`user-invocable-only`), their descriptions are excluded from the startup prompt—they run **only** when you explicitly type `/context-mode:ctx-stats` or `/claude-mem:make-plan`.
+- **Restoring Conversational Catchphrases (`skill-lib protect`)**: If you want any muted plugin skill to auto-trigger on conversational catchphrases instead, promote it to Tier 1:
+  ```bash
+  skill-lib protect claude-mem:make-plan
+  ```
+
+---
+
 ## Measured Context Savings & Live Claude Code Benchmark
 
 Tested on a real workstation with **57 local/harvested skills** (`3` core daily skills pinned active + `54` specialized domain skills offloaded to `~/.agent-skills-library/`) and **88 plugin/synced skills**:
