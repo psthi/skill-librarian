@@ -54,31 +54,33 @@ A common temptation is to build a local `stdio` MCP server (`list_skills`, `sear
    - **Stage 1 (Startup Frontmatter — ~280 tokens)**: `skill-lib sync` compiles a compact list of installed library skill names (grouping multi-skill families like `n8n-* (4)` and supporting optional micro-hints via `skill-lib hint`). For self-descriptive skills (`stripe-cli`, `temporal-developer`, `seo-audit`), the agent jumps directly to `~/.agent-skills-library/<skill>/SKILL.md` in 1 step. For any unfamiliar domain or opaque skill name, the frontmatter fallback rule directs the agent to read `skill-librarian/SKILL.md` first.
    - **Stage 2 (Body Index — 0 Startup Tokens)**: Because harnesses only load YAML frontmatter at startup, the Markdown body of `skill-librarian/SKILL.md` stores the **complete, untruncated descriptions** of all library skills at **zero startup token cost**—preserving every trigger phrase once opened.
 2. **Direct Native `Read` Execution**: When a prompt touches a library domain, the agent reads `~/.agent-skills-library/<skill>/SKILL.md` via its native `Read` tool and resolves any bundled `scripts/` or `references/` relative to that folder.
-3. **Automatic Zero-Prompt Claude Code Permissions**: `skill-lib init` adds `Skill(skill-librarian)` and `Read(~/.agent-skills-library/**)` to `~/.claude/settings.json` so Claude Code can load library skills from any project directory without permission prompts.
+3. **Zero-Touch Auto-Offloading (`SessionStart` Hook + `.keep.json`)**: When you install new skills via `npx skills add` or similar tools, they land in your active skills directory. `skill-lib init` records your pinned active skills in `~/.agent-skills-library/.keep.json` and registers a `SessionStart` hook (`skill-lib sync --quiet`) in `~/.claude/settings.json` that automatically offloads and indexes any newly installed unpinned skills on session start—with zero manual commands required.
+4. **Automatic Zero-Prompt Claude Code Permissions**: `skill-lib init` adds `Skill(skill-librarian)` and `Read(~/.agent-skills-library/**)` to `~/.claude/settings.json` so Claude Code can load library skills from any project directory without permission prompts.
 
 ---
 
 ## Measured Context Savings & Live Claude Code Benchmark
 
-Tested on a real workstation with **36 installed skills** (3 core daily skills kept active + 33 specialized domain skills offloaded to `~/.agent-skills-library/`):
+Tested on a real workstation with **44 installed skills** (3 core daily skills pinned active + 41 specialized domain skills offloaded to `~/.agent-skills-library/`):
 
-| Metric | Before (`36` Active Skills) | After (`3` Core + `skill-librarian` w/ Hints) | Savings |
+| Metric | Before (`44` Active Skills) | After (`3` Pinned + `skill-librarian` w/ Hints) | Savings |
 | :--- | :--- | :--- | :--- |
-| **Active Startup Skills** | 36 skills | 4 skills (`3` core + `1` router) | **32 fewer startup skills** |
-| **Startup Frontmatter Size** | 13,334 chars | 1,472 chars (`1,220` bare / `1,472` with 4 hints) | **11,862 chars saved** |
-| **Estimated Startup Tokens** | ~3,333 tokens / turn | ~368 tokens / turn | **~2,965 tokens / turn (88% reduction)** |
+| **Active Startup Skills** | 44 skills | 4 skills (`3` pinned + `1` router) | **40 fewer startup skills** |
+| **Startup Frontmatter Size** | 15,929 chars | 1,484 chars | **14,445 chars saved** |
+| **Estimated Startup Tokens** | ~3,982 tokens / turn | ~371 tokens / turn | **~3,611 tokens / turn (90% reduction)** |
+| **Marginal Cost of Installing 8 New `gsap-*` Skills** | +2,595 chars (~648 tokens) | **+12 chars (`gsap-* (8)`, ~3 tokens)** | **99.5% marginal reduction** |
 | **Background Daemons** | 0 | 0 | **0 MCP processes** |
 
 ### Live `skill-lib list` Output
 
 ```text
-=== Active Skills in ~/.agents/skills (3 + skill-librarian) ===
+=== Pinned Active Skills in ~/.agents/skills (3 + skill-librarian) ===
   [active]  local-ollama-workflows           ( 126 chars) Standardized local Ollama model routing, selection matrix...
   [active]  obsidian-cli                     ( 179 chars) Cheatsheet and execution standard for managing Obsidian...
   [active]  token-efficient-coding           ( 262 chars) Zero-turn local code outline extraction and multi-languag...
-  [router]  skill-librarian                  ( 905 chars) On-demand router for 33 library skills
+  [router]  skill-librarian                  ( 917 chars) On-demand router for 41 library skills
 
-=== Offline Library Skills in ~/.agent-skills-library (33) ===
+=== Offline Library Skills in ~/.agent-skills-library (41) ===
   [library] agent-reach (social/youtube/reddit) ( 744 chars) Read-only access to platform content: search, read posts...
   [library] anti-ai-slop                     ( 277 chars) Knowledge base from a 9-source compilation on detecting...
   [library] autoreport (reports/pdf)         ( 341 chars) Autonomous short-report, whitepaper, essay, and executive...
@@ -89,6 +91,14 @@ Tested on a real workstation with **36 installed skills** (3 core daily skills k
   [library] epic-infographics                ( 525 chars) Create polished, professional infographic images from dat...
   [library] explainer-video                  ( 416 chars) Turn an article URL, PDF, Markdown/text file, Obsidian li...
   [library] firecrawl-scrape                 ( 402 chars) Extract clean markdown from any URL, including JavaScript...
+  [library] gsap-core                        ( 541 chars) Official GSAP skill for the core API — gsap.to(), from()...
+  [library] gsap-frameworks                  ( 355 chars) Official GSAP skill for Vue, Svelte, and other non-React...
+  [library] gsap-performance                 ( 228 chars) Official GSAP skill for performance — prefer transforms...
+  [library] gsap-plugins                     ( 352 chars) Official GSAP skill for GSAP plugins — registration, Scr...
+  [library] gsap-react                       ( 273 chars) Official GSAP skill for React — useGSAP hook, refs, gsap...
+  [library] gsap-scrolltrigger               ( 323 chars) Official GSAP skill for ScrollTrigger — scroll-linked an...
+  [library] gsap-timeline                    ( 295 chars) Official GSAP skill for timelines — gsap.timeline(), pos...
+  [library] gsap-utils                       ( 228 chars) Official GSAP skill for gsap.utils — clamp, mapRange, no...
   [library] last30days (trends/reddit/x)     ( 246 chars) Research what people actually say about any topic in the ...
   [library] llm-ingestion-compliance         ( 434 chars) Audit and configure a website (emphasis on WordPress) so...
   [library] motion-design                    ( 416 chars) Applies motion design principles to create emotionally-dr...
@@ -106,9 +116,9 @@ Tested on a real workstation with **36 installed skills** (3 core daily skills k
   ... (+9 additional specialized skills)
 
 === Context Window Footprint Summary ===
-  Previous startup frontmatter: 13,334 chars (~3,333 tokens)
-  Current startup frontmatter:  1,472 chars (~368 tokens)
-  Net startup context saved:    11,862 chars (~2,965 tokens, 88% reduction)
+  Previous startup frontmatter: 15,929 chars (~3,982 tokens)
+  Current startup frontmatter:  1,484 chars (~371 tokens)
+  Net startup context saved:    14,445 chars (~3,611 tokens, 90% reduction)
 ```
 
 ### Live Claude Code End-to-End Verification

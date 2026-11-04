@@ -305,9 +305,10 @@ def configure_claude_settings():
 
     hooks = data.setdefault("hooks", {})
     session_start = hooks.setdefault("SessionStart", [])
-    hook_cmd = f"{os.path.join(HOME, '.local', 'bin', 'skill-lib')} sync --quiet"
+    bin_path = shutil.which("skill-lib") or os.path.abspath(sys.argv[0])
+    hook_cmd = f"{bin_path} sync --quiet"
     has_hook = any(
-        any(h.get("command") == hook_cmd for h in entry.get("hooks", []))
+        any("skill-lib" in h.get("command", "") and "sync" in h.get("command", "") for h in entry.get("hooks", []))
         for entry in session_start
         if isinstance(entry, dict)
     )
