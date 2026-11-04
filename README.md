@@ -50,8 +50,10 @@ A common temptation is to build a local `stdio` MCP server (`list_skills`, `sear
 └── ... (30+ specialized domain skills)
 ```
 
-1. **Dynamic Frontmatter Trigger List**: `skill-lib sync` automatically compiles a compact list of installed library skill names (grouping multi-skill families like `n8n-* (4)`) directly into `skill-librarian/SKILL.md`'s frontmatter `description`. The agent knows *immediately* at startup which domains live in the library without extra discovery turns.
-2. **Direct Native `Read` Execution**: When a prompt touches a library domain, the agent invokes `skill-librarian` (or reads `~/.agent-skills-library/<skill>/SKILL.md` directly in one step) and resolves any bundled `scripts/` or `references/` relative to that folder.
+1. **Two-Stage Routing (Fast-Path + Fallback Index)**:
+   - **Stage 1 (Startup Frontmatter — ~280 tokens)**: `skill-lib sync` compiles a compact list of installed library skill names (grouping multi-skill families like `n8n-* (4)` and supporting optional micro-hints via `skill-lib hint`). For self-descriptive skills (`stripe-cli`, `temporal-developer`, `seo-audit`), the agent jumps directly to `~/.agent-skills-library/<skill>/SKILL.md` in 1 step. For any unfamiliar domain or opaque skill name, the frontmatter fallback rule directs the agent to read `skill-librarian/SKILL.md` first.
+   - **Stage 2 (Body Index — 0 Startup Tokens)**: Because harnesses only load YAML frontmatter at startup, the Markdown body of `skill-librarian/SKILL.md` stores the **complete, untruncated descriptions** of all library skills at **zero startup token cost**—preserving every trigger phrase once opened.
+2. **Direct Native `Read` Execution**: When a prompt touches a library domain, the agent reads `~/.agent-skills-library/<skill>/SKILL.md` via its native `Read` tool and resolves any bundled `scripts/` or `references/` relative to that folder.
 3. **Automatic Zero-Prompt Claude Code Permissions**: `skill-lib init` adds `Skill(skill-librarian)` and `Read(~/.agent-skills-library/**)` to `~/.claude/settings.json` so Claude Code can load library skills from any project directory without permission prompts.
 
 ---
@@ -176,6 +178,12 @@ skill-lib search temporal
 
 # Print a library skill's SKILL.md and bundled scripts/references paths
 skill-lib load temporal-developer
+
+# Attach a short startup disambiguation hint to an opaque/brand-named skill
+skill-lib hint last30days "social/reddit/youtube"
+
+# Rename an ambiguously named library skill folder (and its SKILL.md frontmatter name)
+skill-lib rename my-opaque-skill postgres-query-optimizer
 
 # Rebuild skill-librarian/SKILL.md after manually adding folders to ~/.agent-skills-library/
 skill-lib sync

@@ -43,8 +43,27 @@ def resolve_library_dir():
 
 ACTIVE_DIR = resolve_active_dir()
 LIBRARY_DIR = resolve_library_dir()
+HINTS_FILE = os.path.join(LIBRARY_DIR, ".hints.json")
 LIBRARIAN_DIR = os.path.join(ACTIVE_DIR, "skill-librarian")
 LIBRARIAN_SKILL_MD = os.path.join(LIBRARIAN_DIR, "SKILL.md")
+
+
+def load_hints():
+    if not os.path.isfile(HINTS_FILE):
+        return {}
+    try:
+        with open(HINTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_hints(hints):
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    with open(HINTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(hints, f, indent=2, sort_keys=True)
+        f.write("\n")
 
 
 def parse_frontmatter(skill_md_path):
@@ -52,25 +71,28 @@ def parse_frontmatter(skill_md_path):
         with open(skill_md_path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
     except OSError:
-        return "", ""
+        return "", "", ""
 
     m = re.match(r"^---\s*\n(.*?)\n---", text, re.S)
     if not m:
-        return "", ""
+        return "", "", ""
     fm = m.group(1)
     name = ""
     desc = ""
+    hint = ""
     for line in fm.splitlines():
         if line.startswith("name:"):
             name = line.split(":", 1)[1].strip().strip("\"'")
         elif line.startswith("description:"):
             desc = line.split(":", 1)[1].strip().strip("\"'")
+        elif line.startswith("hint:"):
+            hint = line.split(":", 1)[1].strip().strip("\"'")
     if not desc or desc in ("|", ">", "|-", ">-"):
         m2 = re.search(r"description:\s*[|>]-?\s*\n((?:  +.*\n?)+)", fm)
         if m2:
             desc = " ".join(x.strip() for x in m2.group(1).splitlines())
     desc = re.sub(r"\s+", " ", desc).strip()
-    return name, desc
+    return name, desc, hint
 
 
 def short_summary(desc, max_len=110):
@@ -85,17 +107,20 @@ def scan_dir(base_dir):
     skills = []
     if not os.path.isdir(base_dir):
         return skills
+    hints = load_hints() if os.path.abspath(base_dir) == os.path.abspath(LIBRARY_DIR) else {}
     for entry in sorted(os.listdir(base_dir)):
         if entry.startswith(".") or entry in IGNORED_DIRS:
             continue
         full_path = os.path.join(base_dir, entry)
         skill_md = os.path.join(full_path, "SKILL.md")
         if os.path.isfile(skill_md):
-            name, desc = parse_frontmatter(skill_md)
+            name, desc, fm_hint = parse_frontmatter(skill_md)
+            hint = hints.get(entry) or fm_hint
             skills.append({
                 "dir": entry,
                 "name": name or entry,
                 "description": desc,
+                "hint": hint,
                 "summary": short_summary(desc),
                 "path": skill_md,
                 "base_dir": full_path,
@@ -103,14 +128,14 @@ def scan_dir(base_dir):
     return skills
 
 
-def build_compact_trigger_list(lib_skills, max_chars=560):
+def build_compact_trigger_list(lib_skills, max_chars=650):
     if not lib_skills:
         return "currently empty — run 'skill-lib offload <skill>' to populate"
 
     prefix_groups = collections.defaultdict(list)
     for s in lib_skills:
         parts = s["dir"].split("-")
-        if len(parts) >= 2:
+        if len(parts) >= 2 and not s.get("hint"):
             prefix_groups[parts[0]].append(s["dir"])
         else:
             prefix_groups[s["dir"]].append(s["dir"])
@@ -120,6 +145,10 @@ def build_compact_trigger_list(lib_skills, max_chars=560):
     for s in lib_skills:
         d = s["dir"]
         if d in seen:
+            continue
+        if s.get("hint"):
+            tokens.append(f"{d} ({s['hint']})")
+            seen.add(d)
             continue
         prefix = d.split("-")[0]
         group = prefix_groups.get(prefix, [])
@@ -155,8 +184,9 @@ def cmd_sync(_args=None):
             if os.path.isdir(os.path.join(s["base_dir"], sub)):
                 extras.append(f"`{sub}/`")
         extra_str = f" (includes {', '.join(extras)})" if extras else ""
+        full_desc = s["description"] or "No description provided."
         index_lines.append(
-            f"- **{s['dir']}**: {s['summary']}{extra_str}\n"
+            f"- **{s['dir']}**: {full_desc}{extra_str}\n"
             f"  Path: `{s['path']}`"
         )
 
@@ -166,8 +196,9 @@ def cmd_sync(_args=None):
     trigger_list = build_compact_trigger_list(lib_skills)
     frontmatter_desc = (
         f"On-demand capability loader for {len(lib_skills)} specialized skills in ~/.agent-skills-library/ "
-        f"[{trigger_list}]. Invoke this skill or read ~/.agent-skills-library/<name>/SKILL.md "
-        "whenever a request matches one of these domains."
+        f"[{trigger_list}]. Fast-path: read ~/.agent-skills-library/<name>/SKILL.md directly when the skill name matches. "
+        "Fallback: for any specialized domain, external CLI/API, web/social research, scraping, or media/document workflow "
+        "not covered by active skills, invoke skill-librarian (read its SKILL.md index) first."
     )
 
     content = f"""---
@@ -178,13 +209,13 @@ description: "{frontmatter_desc}"
 # Skill Librarian (On-Demand Capability Loader)
 
 To prevent startup context bloat, {len(lib_skills)} specialized domain skills are stored offline in `{LIBRARY_DIR}/`.
+Note: The full descriptions below reside in the body of this file and consume **0 startup tokens** until `skill-librarian` is invoked.
 
 ## Execution Protocol
-1. Match the user's request against the **Library Skills Index** below (or run `skill-lib search <keyword>`).
-2. Load the matching skill instructions on demand using either:
-   - Your native file-reading tool (`Read` / `read_file`) on the `Path` listed below, OR
-   - `skill-lib load <skill-name>` via bash (which prints `SKILL.md` plus any bundled `scripts/` or `references/` paths).
-3. Follow the loaded skill's instructions and resolve any relative script/reference paths against `{LIBRARY_DIR}/<skill-name>/`.
+1. **Fast-Path**: If you already know the target skill name from the startup trigger list, read `{LIBRARY_DIR}/<skill-name>/SKILL.md` directly.
+2. **Index Lookup**: Otherwise, match the user's request against the full **Library Skills Index** below (or run `skill-lib search <keyword>`).
+3. Load the matching skill's instructions using your native file-reading tool (`Read` / `read_file`) on `Path`, or run `skill-lib load <skill-name>`.
+4. Resolve any relative `scripts/`, `references/`, `resources/`, or `examples/` paths against `{LIBRARY_DIR}/<skill-name>/`.
 
 ## CLI Management Commands (`skill-lib`)
 - `skill-lib list` — Show active vs. library skills and context token savings
@@ -192,9 +223,11 @@ To prevent startup context bloat, {len(lib_skills)} specialized domain skills ar
 - `skill-lib load <skill-name>` — Output full `SKILL.md` and bundled asset paths
 - `skill-lib offload <skill-name> [...]` — Move skill(s) from active skills to library and sync index
 - `skill-lib activate <skill-name> [...]` — Move skill(s) from library back to active skills and sync index
+- `skill-lib hint <skill-name> "<hint>"` — Attach a short startup disambiguation hint to an opaque skill name
+- `skill-lib rename <old-name> <new-name>` — Rename a library skill folder and its frontmatter `name:`
 - `skill-lib sync` — Rebuild this `SKILL.md` index from `{LIBRARY_DIR}/`
 
-## Available Library Skills Index ({len(lib_skills)} Skills)
+## Available Library Skills Index ({len(lib_skills)} Skills — Full Untruncated Descriptions)
 {chr(10).join(index_lines)}
 """
     with open(LIBRARIAN_SKILL_MD, "w", encoding="utf-8") as f:
@@ -264,7 +297,7 @@ def cmd_list(_args=None):
     lib_skills = scan_dir(LIBRARY_DIR)
     active_chars = sum(len(s["description"]) for s in active_skills)
     lib_chars = sum(len(s["description"]) for s in lib_skills)
-    _, lib_fm_desc = parse_frontmatter(LIBRARIAN_SKILL_MD) if os.path.isfile(LIBRARIAN_SKILL_MD) else ("", "")
+    _, lib_fm_desc, _ = parse_frontmatter(LIBRARIAN_SKILL_MD) if os.path.isfile(LIBRARIAN_SKILL_MD) else ("", "", "")
     active_total_chars = active_chars + len(lib_fm_desc)
 
     print(f"=== Active Skills in {ACTIVE_DIR} ({len(active_skills)} + skill-librarian) ===")
@@ -275,7 +308,8 @@ def cmd_list(_args=None):
 
     print(f"\n=== Offline Library Skills in {LIBRARY_DIR} ({len(lib_skills)}) ===")
     for s in lib_skills:
-        print(f"  [library] {s['dir']:<32} ({len(s['description']):>4} chars) {s['summary'][:60]}")
+        label = f"{s['dir']} ({s['hint']})" if s.get("hint") else s["dir"]
+        print(f"  [library] {label:<32} ({len(s['description']):>4} chars) {s['summary'][:60]}")
 
     total_before = active_chars + lib_chars
     saved_chars = max(0, lib_chars - len(lib_fm_desc))
@@ -291,7 +325,10 @@ def cmd_search(args):
     lib_skills = scan_dir(LIBRARY_DIR)
     matches = [
         s for s in lib_skills
-        if query in s["dir"].lower() or query in s["name"].lower() or query in s["description"].lower()
+        if query in s["dir"].lower()
+        or query in s["name"].lower()
+        or query in s["description"].lower()
+        or query in (s.get("hint") or "").lower()
     ]
     if not matches:
         print(f"No library skills matching '{query}'.")
@@ -361,6 +398,53 @@ def cmd_activate(args):
     cmd_sync()
 
 
+def cmd_hint(args):
+    target = args.skill_name.strip()
+    skill_dir = os.path.join(LIBRARY_DIR, target)
+    if not os.path.isdir(skill_dir):
+        print(f"Error: Library skill '{target}' not found in {LIBRARY_DIR}", file=sys.stderr)
+        sys.exit(1)
+    hints = load_hints()
+    if args.clear or not args.hint_text:
+        hints.pop(target, None)
+        print(f"Cleared hint for '{target}'")
+    else:
+        hints[target] = args.hint_text.strip()
+        print(f"Set hint for '{target}' -> ({hints[target]})")
+    save_hints(hints)
+    cmd_sync()
+
+
+def cmd_rename(args):
+    old_name = args.old_name.strip()
+    new_name = args.new_name.strip()
+    src = os.path.join(LIBRARY_DIR, old_name)
+    dst = os.path.join(LIBRARY_DIR, new_name)
+    if not os.path.exists(src):
+        print(f"Error: Library skill '{old_name}' not found in {LIBRARY_DIR}", file=sys.stderr)
+        sys.exit(1)
+    if os.path.exists(dst):
+        print(f"Error: Destination '{new_name}' already exists in {LIBRARY_DIR}", file=sys.stderr)
+        sys.exit(1)
+    shutil.move(src, dst)
+    skill_md = os.path.join(dst, "SKILL.md")
+    if os.path.isfile(skill_md):
+        try:
+            with open(skill_md, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            updated = re.sub(r"^(name:\s*).*$", rf"\g<1>{new_name}", text, count=1, flags=re.M)
+            with open(skill_md, "w", encoding="utf-8") as f:
+                f.write(updated)
+        except OSError:
+            pass
+    hints = load_hints()
+    if old_name in hints:
+        hints[new_name] = hints.pop(old_name)
+        save_hints(hints)
+    print(f"Renamed library skill '{old_name}' -> '{new_name}'")
+    cmd_sync()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="skill-lib",
@@ -390,6 +474,15 @@ def main():
     p_activate = sub.add_parser("activate", help="Move library skill(s) back to active skills")
     p_activate.add_argument("skill_names", nargs="+", help="Skill directory name(s)")
 
+    p_hint = sub.add_parser("hint", help="Attach or clear a short startup disambiguation hint for an opaque skill name")
+    p_hint.add_argument("skill_name", help="Skill directory name")
+    p_hint.add_argument("hint_text", nargs="?", default="", help="Short 2-3 word hint (e.g. 'social/youtube/reddit')")
+    p_hint.add_argument("--clear", action="store_true", help="Clear the hint for this skill")
+
+    p_rename = sub.add_parser("rename", help="Rename a library skill folder and update its SKILL.md frontmatter name")
+    p_rename.add_argument("old_name", help="Current skill directory name")
+    p_rename.add_argument("new_name", help="New descriptive skill directory name")
+
     args = parser.parse_args()
     dispatch = {
         "init": cmd_init,
@@ -400,6 +493,8 @@ def main():
         "load": cmd_load,
         "offload": cmd_offload,
         "activate": cmd_activate,
+        "hint": cmd_hint,
+        "rename": cmd_rename,
     }
     dispatch[args.cmd](args)
 
