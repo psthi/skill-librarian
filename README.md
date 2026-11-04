@@ -204,6 +204,10 @@ skill-lib hint last30days "social/reddit/youtube"
 # Rename an ambiguously named library skill folder (and its SKILL.md frontmatter name)
 skill-lib rename my-opaque-skill postgres-query-optimizer
 
+# Run diagnostics (checks paths, missing SKILL.md, index drift, name collisions, permissions & hooks)
+skill-lib doctor
+skill-lib doctor --fix
+
 # Rebuild skill-librarian/SKILL.md after manually adding folders to ~/.agent-skills-library/
 skill-lib sync
 ```

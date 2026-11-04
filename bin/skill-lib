@@ -268,6 +268,7 @@ Note: The full descriptions below reside in the body of this file and consume **
 - `skill-lib activate <skill-name> [...]` — Pin skill(s) to active skills and sync index
 - `skill-lib hint <skill-name> "<hint>"` — Attach a short startup disambiguation hint to an opaque skill name
 - `skill-lib rename <old-name> <new-name>` — Rename a library skill folder and its frontmatter `name:`
+- `skill-lib doctor [--fix]` — Check paths, missing `SKILL.md`, index drift, collisions, permissions, and hooks
 - `skill-lib sync` — Auto-offload newly installed skills and rebuild this `SKILL.md` index
 
 ## Available Library Skills Index ({len(lib_skills)} Skills — Full Untruncated Descriptions)
@@ -523,6 +524,153 @@ def cmd_rename(args):
     cmd_sync()
 
 
+def cmd_doctor(args):
+    issues = 0
+    warnings = 0
+
+    def ok(msg):
+        print(f"  [OK]   {msg}")
+
+    def warn(msg):
+        nonlocal warnings
+        warnings += 1
+        print(f"  [WARN] {msg}")
+
+    def fail(msg):
+        nonlocal issues
+        issues += 1
+        print(f"  [FAIL] {msg}")
+
+    print("=== Skill Librarian Doctor ===")
+
+    # 1. Paths & Binary
+    if os.path.isdir(ACTIVE_DIR) and os.access(ACTIVE_DIR, os.W_OK):
+        ok(f"Active skills directory writable: {ACTIVE_DIR}")
+    else:
+        fail(f"Active skills directory missing or not writable: {ACTIVE_DIR}")
+
+    if os.path.isdir(LIBRARY_DIR) and os.access(LIBRARY_DIR, os.W_OK):
+        ok(f"Offline library directory writable: {LIBRARY_DIR}")
+    else:
+        fail(f"Offline library directory missing or not writable: {LIBRARY_DIR}")
+
+    claude_skills = os.path.join(HOME, ".claude", "skills")
+    if os.path.islink(claude_skills) and not os.path.exists(claude_skills):
+        fail(f"Broken symlink at {claude_skills} -> {os.readlink(claude_skills)}")
+    elif os.path.exists(claude_skills):
+        ok(f"Claude skills path valid: {claude_skills} -> {os.path.realpath(claude_skills)}")
+
+    which_bin = shutil.which("skill-lib")
+    if which_bin:
+        ok(f"skill-lib binary on PATH: {which_bin}")
+    else:
+        warn("skill-lib is not on PATH (add ~/.local/bin to PATH)")
+
+    # 2. Scan directories for broken symlinks, missing SKILL.md, invalid frontmatter, name_mismatch
+    for label, base in [("active", ACTIVE_DIR), ("library", LIBRARY_DIR)]:
+        if not os.path.isdir(base):
+            continue
+        for entry in sorted(os.listdir(base)):
+            if entry.startswith(".") or entry in IGNORED_DIRS:
+                continue
+            full_path = os.path.join(base, entry)
+            if os.path.islink(full_path) and not os.path.exists(full_path):
+                fail(f"Broken symlink in {label}: {full_path} -> {os.readlink(full_path)}")
+                continue
+            if not os.path.isdir(full_path):
+                continue
+            skill_md = os.path.join(full_path, "SKILL.md")
+            if not os.path.isfile(skill_md):
+                warn(f"Directory in {label} missing SKILL.md: {full_path}")
+                continue
+            name, desc, _ = parse_frontmatter(skill_md)
+            if not name or not desc:
+                warn(f"Incomplete YAML frontmatter (missing name or description) in {skill_md}")
+            elif label == "active" and name != entry:
+                fail(f"Active skill frontmatter name '{name}' mismatches folder '{entry}' (Claude Code rejects name_mismatch)")
+
+    # 3. Name collisions between active and library
+    active_names = {s["dir"] for s in scan_dir(ACTIVE_DIR)}
+    lib_skills = scan_dir(LIBRARY_DIR)
+    lib_names = {s["dir"] for s in lib_skills}
+    collisions = sorted(active_names & lib_names)
+    if collisions:
+        fail(f"Name collision(s) present in both active and library dirs: {', '.join(collisions)}")
+    else:
+        ok(f"No name collisions between active ({len(active_names)}) and library ({len(lib_names)}) skills")
+
+    # 4. Index alignment & stale entries
+    if not os.path.isfile(LIBRARIAN_SKILL_MD):
+        fail(f"Router skill missing: {LIBRARIAN_SKILL_MD}")
+    else:
+        with open(LIBRARIAN_SKILL_MD, "r", encoding="utf-8", errors="replace") as f:
+            router_text = f.read()
+        indexed_names = set(re.findall(r"^- \*\*([^*]+)\*\*:", router_text, flags=re.M))
+        missing_in_index = sorted(lib_names - indexed_names)
+        stale_in_index = sorted(indexed_names - lib_names)
+        if missing_in_index:
+            fail(f"Skills on disk missing from skill-librarian index: {', '.join(missing_in_index)}")
+        if stale_in_index:
+            fail(f"Stale entries in skill-librarian index not on disk: {', '.join(stale_in_index)}")
+        if not missing_in_index and not stale_in_index:
+            ok(f"Router index aligned with filesystem ({len(indexed_names)}/{len(lib_names)} library skills indexed)")
+
+    keep_set = load_keep()
+    if keep_set is not None:
+        unpinned_active = sorted(active_names - keep_set)
+        if unpinned_active:
+            warn(f"Unpinned active skill(s) waiting to be offloaded: {', '.join(unpinned_active)}")
+        else:
+            ok(f"Pinned active skills aligned with .keep.json ({len(active_names)} pinned)")
+
+    hints = load_hints()
+    stale_hints = sorted(set(hints.keys()) - lib_names)
+    if stale_hints:
+        warn(f"Stale hint(s) in .hints.json for non-existent library skills: {', '.join(stale_hints)}")
+
+    # 5. Claude Code permissions & SessionStart hook
+    claude_settings_path = os.path.join(HOME, ".claude", "settings.json")
+    if os.path.isfile(claude_settings_path):
+        try:
+            with open(claude_settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            allow = data.get("permissions", {}).get("allow", [])
+            req_read = f"Read({LIBRARY_DIR}/**)"
+            if "Skill(skill-librarian)" in allow and req_read in allow:
+                ok(f"Claude Code zero-prompt permissions configured ({req_read})")
+            else:
+                fail(f"Missing Skill(skill-librarian) or {req_read} in {claude_settings_path}")
+
+            session_start = data.get("hooks", {}).get("SessionStart", [])
+            has_hook = any(
+                any("skill-lib" in h.get("command", "") and "sync" in h.get("command", "") for h in entry.get("hooks", []))
+                for entry in session_start
+                if isinstance(entry, dict)
+            )
+            if has_hook:
+                ok("Claude Code SessionStart auto-sync hook configured")
+            else:
+                warn(f"Claude Code SessionStart auto-sync hook missing in {claude_settings_path}")
+        except (OSError, json.JSONDecodeError) as e:
+            fail(f"Could not parse {claude_settings_path}: {e}")
+
+    if args.fix and (issues > 0 or warnings > 0):
+        print("\nApplying automatic fixes (--fix)...")
+        if stale_hints:
+            for k in stale_hints:
+                hints.pop(k, None)
+            save_hints(hints)
+        configure_claude_settings()
+        cmd_sync()
+        print("Fixes applied. Re-run 'skill-lib doctor' to verify.")
+        return
+
+    print(f"\nDoctor summary: {issues} error(s), {warnings} warning(s).")
+    if issues > 0:
+        print("Run 'skill-lib doctor --fix' or 'skill-lib sync' to repair.")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="skill-lib",
@@ -563,6 +711,9 @@ def main():
     p_rename.add_argument("old_name", help="Current skill directory name")
     p_rename.add_argument("new_name", help="New descriptive skill directory name")
 
+    p_doctor = sub.add_parser("doctor", help="Check paths, missing SKILL.md, index drift, collisions, permissions, and hooks")
+    p_doctor.add_argument("--fix", action="store_true", help="Automatically repair index drift, stale hints, and Claude settings")
+
     args = parser.parse_args()
     dispatch = {
         "init": cmd_init,
@@ -575,6 +726,7 @@ def main():
         "activate": cmd_activate,
         "hint": cmd_hint,
         "rename": cmd_rename,
+        "doctor": cmd_doctor,
     }
     dispatch[args.cmd](args)
 
