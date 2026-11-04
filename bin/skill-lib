@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+import argparse
+import collections
+import json
+import os
+import re
+import shutil
+import sys
+
+HOME = os.path.expanduser("~")
+IGNORED_DIRS = {
+    ".system",
+    "synced",
+    "learned",
+    "skill-librarian",
+    "sound-machine-workspace",
+    ".git",
+    "__pycache__",
+}
+
+
+def resolve_active_dir():
+    env_dir = os.environ.get("SKILL_LIB_ACTIVE_DIR")
+    if env_dir:
+        return os.path.expanduser(env_dir)
+    claude_skills = os.path.join(HOME, ".claude", "skills")
+    agents_skills = os.path.join(HOME, ".agents", "skills")
+    if os.path.islink(claude_skills):
+        return os.path.realpath(claude_skills)
+    if os.path.isdir(claude_skills):
+        return claude_skills
+    if os.path.isdir(agents_skills):
+        return agents_skills
+    return claude_skills
+
+
+def resolve_library_dir():
+    env_dir = os.environ.get("SKILL_LIB_DIR")
+    if env_dir:
+        return os.path.expanduser(env_dir)
+    return os.path.join(HOME, ".agent-skills-library")
+
+
+ACTIVE_DIR = resolve_active_dir()
+LIBRARY_DIR = resolve_library_dir()
+LIBRARIAN_DIR = os.path.join(ACTIVE_DIR, "skill-librarian")
+LIBRARIAN_SKILL_MD = os.path.join(LIBRARIAN_DIR, "SKILL.md")
+
+
+def parse_frontmatter(skill_md_path):
+    try:
+        with open(skill_md_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return "", ""
+
+    m = re.match(r"^---\s*\n(.*?)\n---", text, re.S)
+    if not m:
+        return "", ""
+    fm = m.group(1)
+    name = ""
+    desc = ""
+    for line in fm.splitlines():
+        if line.startswith("name:"):
+            name = line.split(":", 1)[1].strip().strip("\"'")
+        elif line.startswith("description:"):
+            desc = line.split(":", 1)[1].strip().strip("\"'")
+    if not desc or desc in ("|", ">", "|-", ">-"):
+        m2 = re.search(r"description:\s*[|>]-?\s*\n((?:  +.*\n?)+)", fm)
+        if m2:
+            desc = " ".join(x.strip() for x in m2.group(1).splitlines())
+    desc = re.sub(r"\s+", " ", desc).strip()
+    return name, desc
+
+
+def short_summary(desc, max_len=110):
+    first_sentence = re.split(r"(?<=[.!?])\s+", desc)[0] if desc else ""
+    target = first_sentence if 15 <= len(first_sentence) <= max_len else desc
+    if len(target) > max_len:
+        return target[: max_len - 3].rstrip() + "..."
+    return target
+
+
+def scan_dir(base_dir):
+    skills = []
+    if not os.path.isdir(base_dir):
+        return skills
+    for entry in sorted(os.listdir(base_dir)):
+        if entry.startswith(".") or entry in IGNORED_DIRS:
+            continue
+        full_path = os.path.join(base_dir, entry)
+        skill_md = os.path.join(full_path, "SKILL.md")
+        if os.path.isfile(skill_md):
+            name, desc = parse_frontmatter(skill_md)
+            skills.append({
+                "dir": entry,
+                "name": name or entry,
+                "description": desc,
+                "summary": short_summary(desc),
+                "path": skill_md,
+                "base_dir": full_path,
+            })
+    return skills
+
+
+def build_compact_trigger_list(lib_skills, max_chars=560):
+    if not lib_skills:
+        return "currently empty — run 'skill-lib offload <skill>' to populate"
+
+    prefix_groups = collections.defaultdict(list)
+    for s in lib_skills:
+        parts = s["dir"].split("-")
+        if len(parts) >= 2:
+            prefix_groups[parts[0]].append(s["dir"])
+        else:
+            prefix_groups[s["dir"]].append(s["dir"])
+
+    tokens = []
+    seen = set()
+    for s in lib_skills:
+        d = s["dir"]
+        if d in seen:
+            continue
+        prefix = d.split("-")[0]
+        group = prefix_groups.get(prefix, [])
+        if len(group) >= 2:
+            tokens.append(f"{prefix}-* ({len(group)})")
+            seen.update(group)
+        else:
+            tokens.append(d)
+            seen.add(d)
+
+    out = []
+    cur_len = 0
+    for idx, t in enumerate(tokens):
+        addition = (", " if out else "") + t
+        if cur_len + len(addition) > max_chars:
+            remaining = len(tokens) - idx
+            out.append(f"+{remaining} more")
+            break
+        out.append(t)
+        cur_len += len(addition)
+    return ", ".join(out)
+
+
+def cmd_sync(_args=None):
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    os.makedirs(LIBRARIAN_DIR, exist_ok=True)
+    lib_skills = scan_dir(LIBRARY_DIR)
+
+    index_lines = []
+    for s in lib_skills:
+        extras = []
+        for sub in ("scripts", "references", "resources", "examples"):
+            if os.path.isdir(os.path.join(s["base_dir"], sub)):
+                extras.append(f"`{sub}/`")
+        extra_str = f" (includes {', '.join(extras)})" if extras else ""
+        index_lines.append(
+            f"- **{s['dir']}**: {s['summary']}{extra_str}\n"
+            f"  Path: `{s['path']}`"
+        )
+
+    if not index_lines:
+        index_lines.append("- *(No skills in library yet. Run `skill-lib offload <skill-name>` to move skills here.)*")
+
+    trigger_list = build_compact_trigger_list(lib_skills)
+    frontmatter_desc = (
+        f"On-demand capability loader for {len(lib_skills)} specialized skills in ~/.agent-skills-library/ "
+        f"[{trigger_list}]. Invoke this skill or read ~/.agent-skills-library/<name>/SKILL.md "
+        "whenever a request matches one of these domains."
+    )
+
+    content = f"""---
+name: skill-librarian
+description: "{frontmatter_desc}"
+---
+
+# Skill Librarian (On-Demand Capability Loader)
+
+To prevent startup context bloat, {len(lib_skills)} specialized domain skills are stored offline in `{LIBRARY_DIR}/`.
+
+## Execution Protocol
+1. Match the user's request against the **Library Skills Index** below (or run `skill-lib search <keyword>`).
+2. Load the matching skill instructions on demand using either:
+   - Your native file-reading tool (`Read` / `read_file`) on the `Path` listed below, OR
+   - `skill-lib load <skill-name>` via bash (which prints `SKILL.md` plus any bundled `scripts/` or `references/` paths).
+3. Follow the loaded skill's instructions and resolve any relative script/reference paths against `{LIBRARY_DIR}/<skill-name>/`.
+
+## CLI Management Commands (`skill-lib`)
+- `skill-lib list` — Show active vs. library skills and context token savings
+- `skill-lib search <query>` — Keyword search across library skill names and descriptions
+- `skill-lib load <skill-name>` — Output full `SKILL.md` and bundled asset paths
+- `skill-lib offload <skill-name> [...]` — Move skill(s) from active skills to library and sync index
+- `skill-lib activate <skill-name> [...]` — Move skill(s) from library back to active skills and sync index
+- `skill-lib sync` — Rebuild this `SKILL.md` index from `{LIBRARY_DIR}/`
+
+## Available Library Skills Index ({len(lib_skills)} Skills)
+{chr(10).join(index_lines)}
+"""
+    with open(LIBRARIAN_SKILL_MD, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"Synced {len(lib_skills)} library skills into {LIBRARIAN_SKILL_MD}")
+
+
+def configure_claude_permissions():
+    claude_settings_path = os.path.join(HOME, ".claude", "settings.json")
+    if not os.path.isfile(claude_settings_path):
+        return False
+    try:
+        with open(claude_settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    perms = data.setdefault("permissions", {})
+    allow = perms.setdefault("allow", [])
+    needed = [
+        "Skill(skill-librarian)",
+        f"Read({LIBRARY_DIR}/**)",
+        "Bash(skill-lib *)",
+        "Bash(rtk skill-lib *)",
+    ]
+    changed = False
+    for rule in needed:
+        if rule not in allow:
+            allow.insert(0, rule)
+            changed = True
+
+    if changed:
+        with open(claude_settings_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+    return changed
+
+
+def cmd_init(args):
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    os.makedirs(ACTIVE_DIR, exist_ok=True)
+    perms_updated = configure_claude_permissions()
+
+    if args.offload_all:
+        keep_set = {k.strip() for k in (args.keep or "").split(",") if k.strip()}
+        active_skills = scan_dir(ACTIVE_DIR)
+        moved = 0
+        for s in active_skills:
+            if s["dir"] in keep_set:
+                continue
+            src = os.path.join(ACTIVE_DIR, s["dir"])
+            dst = os.path.join(LIBRARY_DIR, s["dir"])
+            if os.path.exists(dst):
+                shutil.rmtree(dst) if os.path.isdir(dst) and not os.path.islink(dst) else os.remove(dst)
+            shutil.move(src, dst)
+            moved += 1
+        print(f"Offloaded {moved} skills to {LIBRARY_DIR} (kept: {', '.join(sorted(keep_set)) or 'none'})")
+
+    cmd_sync()
+    if perms_updated:
+        print("Updated ~/.claude/settings.json with zero-prompt Read/Skill permissions for skill-librarian.")
+    print(f"\nInitialized Skill Librarian!\n  Active skills dir:  {ACTIVE_DIR}\n  Offline library:    {LIBRARY_DIR}")
+
+
+def cmd_list(_args=None):
+    active_skills = scan_dir(ACTIVE_DIR)
+    lib_skills = scan_dir(LIBRARY_DIR)
+    active_chars = sum(len(s["description"]) for s in active_skills)
+    lib_chars = sum(len(s["description"]) for s in lib_skills)
+    _, lib_fm_desc = parse_frontmatter(LIBRARIAN_SKILL_MD) if os.path.isfile(LIBRARIAN_SKILL_MD) else ("", "")
+    active_total_chars = active_chars + len(lib_fm_desc)
+
+    print(f"=== Active Skills in {ACTIVE_DIR} ({len(active_skills)} + skill-librarian) ===")
+    for s in active_skills:
+        print(f"  [active]  {s['dir']:<32} ({len(s['description']):>4} chars) {s['summary'][:60]}")
+    if lib_fm_desc:
+        print(f"  [router]  {'skill-librarian':<32} ({len(lib_fm_desc):>4} chars) On-demand router for {len(lib_skills)} library skills")
+
+    print(f"\n=== Offline Library Skills in {LIBRARY_DIR} ({len(lib_skills)}) ===")
+    for s in lib_skills:
+        print(f"  [library] {s['dir']:<32} ({len(s['description']):>4} chars) {s['summary'][:60]}")
+
+    total_before = active_chars + lib_chars
+    saved_chars = max(0, lib_chars - len(lib_fm_desc))
+    pct = (saved_chars * 100 // total_before) if total_before > 0 else 0
+    print("\n=== Context Window Footprint Summary ===")
+    print(f"  Previous startup frontmatter: {total_before:,} chars (~{total_before // 4:,} tokens)")
+    print(f"  Current startup frontmatter:  {active_total_chars:,} chars (~{active_total_chars // 4:,} tokens)")
+    print(f"  Net startup context saved:    {saved_chars:,} chars (~{saved_chars // 4:,} tokens, {pct}% reduction)")
+
+
+def cmd_search(args):
+    query = " ".join(args.query).lower()
+    lib_skills = scan_dir(LIBRARY_DIR)
+    matches = [
+        s for s in lib_skills
+        if query in s["dir"].lower() or query in s["name"].lower() or query in s["description"].lower()
+    ]
+    if not matches:
+        print(f"No library skills matching '{query}'.")
+        sys.exit(1)
+    for s in matches:
+        print(f"{s['dir']}: {s['description']}\n  Path: {s['path']}")
+
+
+def cmd_load(args):
+    target = args.skill_name.strip()
+    skill_dir = os.path.join(LIBRARY_DIR, target)
+    skill_md = os.path.join(skill_dir, "SKILL.md")
+    if not os.path.isfile(skill_md):
+        print(f"Error: Skill '{target}' not found at {skill_md}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"=== SKILL BASE DIRECTORY: {skill_dir} ===")
+    for sub in ("scripts", "references", "resources", "examples"):
+        sub_path = os.path.join(skill_dir, sub)
+        if os.path.isdir(sub_path):
+            files = sorted(os.listdir(sub_path))
+            print(f"=== BUNDLED {sub.upper()} ({sub_path}): {', '.join(files[:20])} ===")
+    print()
+    with open(skill_md, "r", encoding="utf-8", errors="replace") as f:
+        print(f.read())
+
+
+def cmd_offload(args):
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    if args.all:
+        keep_set = {k.strip() for k in (args.keep or "").split(",") if k.strip()}
+        targets = [s["dir"] for s in scan_dir(ACTIVE_DIR) if s["dir"] not in keep_set]
+    else:
+        targets = [t.strip() for t in args.skill_names if t.strip()]
+
+    if not targets:
+        print("No matching active skills to offload.", file=sys.stderr)
+        sys.exit(1)
+
+    for target in targets:
+        src = os.path.join(ACTIVE_DIR, target)
+        dst = os.path.join(LIBRARY_DIR, target)
+        if not os.path.exists(src):
+            print(f"Warning: Active skill '{target}' not found in {ACTIVE_DIR}", file=sys.stderr)
+            continue
+        if os.path.exists(dst):
+            shutil.rmtree(dst) if os.path.isdir(dst) and not os.path.islink(dst) else os.remove(dst)
+        shutil.move(src, dst)
+        print(f"Offloaded '{target}' -> {dst}")
+    cmd_sync()
+
+
+def cmd_activate(args):
+    os.makedirs(ACTIVE_DIR, exist_ok=True)
+    for target in args.skill_names:
+        target = target.strip()
+        src = os.path.join(LIBRARY_DIR, target)
+        dst = os.path.join(ACTIVE_DIR, target)
+        if not os.path.exists(src):
+            print(f"Warning: Library skill '{target}' not found in {LIBRARY_DIR}", file=sys.stderr)
+            continue
+        if os.path.exists(dst):
+            print(f"Warning: '{target}' already exists in {ACTIVE_DIR}", file=sys.stderr)
+            continue
+        shutil.move(src, dst)
+        print(f"Activated '{target}' -> {dst}")
+    cmd_sync()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="skill-lib",
+        description="Two-tier on-demand skill manager & router for Claude Code, Antigravity, and OpenCode.",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_init = sub.add_parser("init", help="Initialize ~/.agent-skills-library, router skill, and Claude permissions")
+    p_init.add_argument("--offload-all", action="store_true", help="Offload all current active skills to the library")
+    p_init.add_argument("--keep", type=str, default="", help="Comma-separated list of active skills to keep when using --offload-all")
+
+    sub.add_parser("list", help="List active and library skills with context token savings")
+    sub.add_parser("status", help="Alias for list")
+    sub.add_parser("sync", help="Regenerate skill-librarian/SKILL.md from library")
+
+    p_search = sub.add_parser("search", help="Search library skills by keyword")
+    p_search.add_argument("query", nargs="+", help="Search query")
+
+    p_load = sub.add_parser("load", help="Print SKILL.md and asset paths for a library skill")
+    p_load.add_argument("skill_name", help="Skill directory name")
+
+    p_offload = sub.add_parser("offload", help="Move active skill(s) to the offline library")
+    p_offload.add_argument("skill_names", nargs="*", help="Skill directory name(s)")
+    p_offload.add_argument("--all", action="store_true", help="Offload all active skills except those in --keep")
+    p_offload.add_argument("--keep", type=str, default="", help="Comma-separated list of active skills to keep active")
+
+    p_activate = sub.add_parser("activate", help="Move library skill(s) back to active skills")
+    p_activate.add_argument("skill_names", nargs="+", help="Skill directory name(s)")
+
+    args = parser.parse_args()
+    dispatch = {
+        "init": cmd_init,
+        "list": cmd_list,
+        "status": cmd_list,
+        "sync": cmd_sync,
+        "search": cmd_search,
+        "load": cmd_load,
+        "offload": cmd_offload,
+        "activate": cmd_activate,
+    }
+    dispatch[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()
