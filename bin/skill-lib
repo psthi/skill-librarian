@@ -196,7 +196,7 @@ def cmd_sync(_args=None):
     trigger_list = build_compact_trigger_list(lib_skills)
     frontmatter_desc = (
         f"On-demand capability loader for {len(lib_skills)} specialized skills in ~/.agent-skills-library/ "
-        f"[{trigger_list}]. Fast-path: read ~/.agent-skills-library/<name>/SKILL.md directly when the skill name matches. "
+        f"[{trigger_list}]. Fast-path: read ~/.agent-skills-library/{{name}}/SKILL.md directly when the skill name matches. "
         "Fallback: for any specialized domain, external CLI/API, web/social research, scraping, or media/document workflow "
         "not covered by active skills, invoke skill-librarian (read its SKILL.md index) first."
     )

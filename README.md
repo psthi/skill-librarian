@@ -7,7 +7,7 @@
 ## GitHub Repository Metadata
 
 - **Repository Name**: `psthi/skill-librarian`
-- **Short Description (About)**: Zero-daemon, two-tier on-demand skill router and CLI manager that eliminates `SKILL.md` startup context bloat (~91% token reduction) in Claude Code, Antigravity, and OpenCode.
+- **Short Description (About)**: Zero-daemon, two-tier on-demand skill router and CLI manager that eliminates `SKILL.md` startup context bloat (~88–91% token reduction) in Claude Code, Antigravity, and OpenCode.
 - **Topics / Tags**: `claude-code`, `agent-skills`, `context-window`, `token-optimization`, `ai-agents`, `antigravity`, `opencode`, `prompt-engineering`, `cli`, `developer-tools`
 
 ---
@@ -62,11 +62,11 @@ A common temptation is to build a local `stdio` MCP server (`list_skills`, `sear
 
 Tested on a real workstation with **36 installed skills** (3 core daily skills kept active + 33 specialized domain skills offloaded to `~/.agent-skills-library/`):
 
-| Metric | Before (`36` Active Skills) | After (`3` Core + `skill-librarian`) | Savings |
+| Metric | Before (`36` Active Skills) | After (`3` Core + `skill-librarian` w/ Hints) | Savings |
 | :--- | :--- | :--- | :--- |
 | **Active Startup Skills** | 36 skills | 4 skills (`3` core + `1` router) | **32 fewer startup skills** |
-| **Startup Frontmatter Size** | 13,334 chars | 1,081 chars | **12,253 chars saved** |
-| **Estimated Startup Tokens** | ~3,333 tokens / turn | ~270 tokens / turn | **~3,063 tokens / turn (91% reduction)** |
+| **Startup Frontmatter Size** | 13,334 chars | 1,472 chars (`1,220` bare / `1,472` with 4 hints) | **11,862 chars saved** |
+| **Estimated Startup Tokens** | ~3,333 tokens / turn | ~368 tokens / turn | **~2,965 tokens / turn (88% reduction)** |
 | **Background Daemons** | 0 | 0 | **0 MCP processes** |
 
 ### Live `skill-lib list` Output
@@ -76,19 +76,20 @@ Tested on a real workstation with **36 installed skills** (3 core daily skills k
   [active]  local-ollama-workflows           ( 126 chars) Standardized local Ollama model routing, selection matrix...
   [active]  obsidian-cli                     ( 179 chars) Cheatsheet and execution standard for managing Obsidian...
   [active]  token-efficient-coding           ( 262 chars) Zero-turn local code outline extraction and multi-languag...
-  [router]  skill-librarian                  ( 567 chars) On-demand router for 33 library skills
+  [router]  skill-librarian                  ( 905 chars) On-demand router for 33 library skills
 
 === Offline Library Skills in ~/.agent-skills-library (33) ===
-  [library] agent-reach                      ( 744 chars) Read-only access to platform content: search, read posts...
+  [library] agent-reach (social/youtube/reddit) ( 744 chars) Read-only access to platform content: search, read posts...
   [library] anti-ai-slop                     ( 277 chars) Knowledge base from a 9-source compilation on detecting...
-  [library] autoreport                       ( 341 chars) Autonomous short-report, whitepaper, essay, and executive...
+  [library] autoreport (reports/pdf)         ( 341 chars) Autonomous short-report, whitepaper, essay, and executive...
   [library] book-to-skill                    ( 432 chars) Converts books and documents (PDF, EPUB, DOCX, HTML, Mark...
   [library] composio-cli                     ( 587 chars) Help users operate the published Composio CLI to find the...
-  [library] crawl4ai                         ( 275 chars) This skill should be used when users need to scrape websi...
+  [library] crawl4ai (scrape/extract)        ( 275 chars) This skill should be used when users need to scrape websi...
   [library] dotlottie-web                    ( 387 chars) Implement Lottie animations using dotLottie runtimes (@lo...
   [library] epic-infographics                ( 525 chars) Create polished, professional infographic images from dat...
   [library] explainer-video                  ( 416 chars) Turn an article URL, PDF, Markdown/text file, Obsidian li...
   [library] firecrawl-scrape                 ( 402 chars) Extract clean markdown from any URL, including JavaScript...
+  [library] last30days (trends/reddit/x)     ( 246 chars) Research what people actually say about any topic in the ...
   [library] llm-ingestion-compliance         ( 434 chars) Audit and configure a website (emphasis on WordPress) so...
   [library] motion-design                    ( 416 chars) Applies motion design principles to create emotionally-dr...
   [library] n8n-agents-official              ( 769 chars) Use when building or editing any AI feature in n8n: AI Ag...
@@ -102,24 +103,32 @@ Tested on a real workstation with **36 installed skills** (3 core daily skills k
   [library] stripe-cli                       ( 135 chars) Operational guidelines and CLI cheatsheet for AI agents u...
   [library] temporal-developer               ( 801 chars) Develop, debug, and manage Temporal applications across P...
   [library] windmill                         ( 406 chars) Knowledge base from the official Windmill documentation (...
-  ... (+10 additional specialized skills)
+  ... (+9 additional specialized skills)
 
 === Context Window Footprint Summary ===
   Previous startup frontmatter: 13,334 chars (~3,333 tokens)
-  Current startup frontmatter:  1,134 chars (~283 tokens)
-  Net startup context saved:    12,200 chars (~3,050 tokens, 91% reduction)
+  Current startup frontmatter:  1,472 chars (~368 tokens)
+  Net startup context saved:    11,862 chars (~2,965 tokens, 88% reduction)
 ```
 
 ### Live Claude Code End-to-End Verification
 
-Verified in headless mode against `claude` (`Claude Code 2.1.318` / `claude-haiku-5-5`) with only `Skill` and `Read` tools enabled:
+Verified in headless mode against `claude` (`Claude Code 2.1.318` / `claude-haiku-5-5`) with `Skill` and `Read` tools enabled:
 
+#### Test 1: Fast-Path Domain Match (`stripe-cli`)
 ```bash
 claude -p "Use skill-librarian to read the stripe-cli skill and list its webhook commands." \
   --allowedTools "Skill,Read"
 ```
+- **Result**: Claude Code matched `stripe-cli` from `skill-librarian`'s startup trigger list, read `~/.agent-skills-library/stripe-cli/SKILL.md` directly via the native `Read` tool with zero permission prompts, and returned the exact webhook forwarding (`stripe listen --forward-to`) and mock event (`stripe trigger <event>`) commands.
 
-- **Behavior**: Claude Code matched `stripe-cli` from `skill-librarian`'s startup trigger list, read `~/.agent-skills-library/stripe-cli/SKILL.md` directly via the native `Read` tool with zero permission prompts, and returned the exact webhook forwarding (`stripe listen --forward-to`) and mock event (`stripe trigger <event>`) commands.
+#### Test 2: Blind Routing on an Opaque Brand-Named Skill (`agent-reach`)
+Prompted **without** mentioning `skill-librarian` or `agent-reach` anywhere in the prompt:
+```bash
+claude -p "Without searching the web, check my installed skills to tell me the exact command to check which social platforms (like Xiaohongshu or YouTube subtitles) are currently configured and healthy." \
+  --allowedTools "Skill,Read"
+```
+- **Result**: From the startup entry `agent-reach (social/youtube/reddit)`, Claude Code identified `agent-reach` on Turn 1, called `Read("~/.agent-skills-library/agent-reach/SKILL.md")`, and returned the exact health-check commands (`agent-reach doctor --text` and `agent-reach check xiaohongshu --text`).
 
 ---
 
